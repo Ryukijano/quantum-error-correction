@@ -63,7 +63,9 @@ class StimStringBuilder:
         self.add(f"OBSERVABLE_INCLUDE(0) {rec_terms}")
 
     def qubit_coords(self) -> None:
-        for index, coord in self.coord_lookup.items():
+        # Emit QUBIT_COORDS in deterministic order by sorted qubit index.
+        for index in sorted(self.coord_lookup):
+            coord = self.coord_lookup[index]
             self.add(f"QUBIT_COORDS({coord[0]},{coord[1]}) {index}")
 
     def build(self) -> str:
