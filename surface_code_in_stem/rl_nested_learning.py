@@ -8,6 +8,7 @@ without requiring long simulation times.
 
 from __future__ import annotations
 
+from numbers import Real
 from typing import Callable, Dict, Iterable
 
 import numpy as np
@@ -58,8 +59,12 @@ def compare_nested_policies(
     if not isinstance(shots, int) or shots <= 0:
         raise ValueError("shots must be a positive integer.")
 
-    if not isinstance(p, float) or not 0.0 <= p <= 1.0:
-        raise ValueError("p must be a float between 0 and 1 (inclusive).")
+    if isinstance(p, bool) or not isinstance(p, Real):
+        raise ValueError("p must be a real number between 0 and 1 (inclusive).")
+
+    p_value = float(p)
+    if not 0.0 <= p_value <= 1.0:
+        raise ValueError("p must be a real number between 0 and 1 (inclusive).")
 
     if not callable(static_builder):
         raise ValueError("static_builder must be callable.")
@@ -73,12 +78,12 @@ def compare_nested_policies(
     results: Dict[str, Dict[str, float | int | str | None]] = {}
 
     for name, builder in policies.items():
-        circuit_str = builder(distance, rounds, p)
+        circuit_str = builder(distance, rounds, p_value)
         results[name] = {
             "builder": builder.__name__,
             "distance": distance,
             "rounds": rounds,
-            "p": p,
+            "p": p_value,
             "shots": shots,
             "seed": seed,
             "logical_error_rate": _logical_error_rate(circuit_str, shots, seed),
