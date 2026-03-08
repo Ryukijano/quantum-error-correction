@@ -11,7 +11,11 @@ from surface_code_in_stem.dynamic import (
 from surface_code_in_stem.rl_nested_learning import compare_nested_policies, tabulate_comparison
 
 
-def test_compare_nested_policies_and_tabulation():
+@pytest.mark.parametrize(
+    "dynamic_builder",
+    [hexagonal_surface_code, iswap_surface_code, walking_surface_code],
+)
+def test_compare_nested_policies_and_tabulation(dynamic_builder):
     expected_keys = {
         "builder",
         "distance",
