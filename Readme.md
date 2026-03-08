@@ -21,3 +21,16 @@ This repository contains implementations and simulations of quantum error correc
 ## Installation
 ```bash
 pip install stim pymatching numpy matplotlib
+```
+
+## Reinforcement learning quickstart
+
+The `rl_nested_learning.py` utilities rely on the optional [`stim`](https://github.com/quantumlib/Stim) package for circuit
+generation and simulation. Install Stim before running the RL examples:
+
+```bash
+pip install stim
+```
+
+If Stim is missing, importing `rl_nested_learning` will defer the error until a Stim-powered feature is used, while providing a
+clear installation hint so the module remains importable in lightweight environments.
