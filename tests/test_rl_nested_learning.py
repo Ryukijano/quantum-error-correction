@@ -30,6 +30,20 @@ def test_compare_nested_policies_and_tabulation():
         assert np.isfinite(row["logical_error_rate"])
 
 
+@pytest.mark.parametrize("real_prob", [np.float32(0.01), np.float64(0.2), 0, 1])
+def test_compare_nested_policies_accepts_real_probabilities(real_prob):
+    comparison = compare_nested_policies(
+        distance=3,
+        rounds=3,
+        p=real_prob,
+        shots=4,
+        seed=11,
+    )
+
+    for metrics in comparison.values():
+        assert metrics["p"] == float(real_prob)
+
+
 @pytest.mark.parametrize("bad_distance", [2, 4, 1.5])
 def test_compare_nested_policies_rejects_invalid_distance(bad_distance):
     with pytest.raises(ValueError, match="distance"):
@@ -48,7 +62,7 @@ def test_compare_nested_policies_rejects_invalid_shots(bad_shots):
         compare_nested_policies(distance=3, rounds=3, p=0.001, shots=bad_shots)
 
 
-@pytest.mark.parametrize("bad_p", [-0.1, 1.1, 1])
+@pytest.mark.parametrize("bad_p", [-0.1, 1.1, np.nan, complex(0.5), "0.1", np.array([0.1]), True])
 def test_compare_nested_policies_rejects_invalid_p(bad_p):
     with pytest.raises(ValueError, match="p"):
         compare_nested_policies(distance=3, rounds=3, p=bad_p, shots=8)
