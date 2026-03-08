@@ -54,6 +54,25 @@ def compare_nested_policies(
     and the simulation metadata used to generate it.
     """
 
+    if not isinstance(distance, int):
+        raise ValueError("distance must be an integer.")
+    if distance < 3 or distance % 2 == 0:
+        raise ValueError("distance must be an odd integer >= 3.")
+
+    if not isinstance(rounds, int) or rounds <= 0:
+        raise ValueError("rounds must be a positive integer.")
+
+    if not isinstance(shots, int) or shots <= 0:
+        raise ValueError("shots must be a positive integer.")
+
+    if not isinstance(p, float) or not 0.0 <= p <= 1.0:
+        raise ValueError("p must be a float between 0 and 1 (inclusive).")
+
+    if not callable(static_builder):
+        raise ValueError("static_builder must be callable.")
+    if not callable(dynamic_builder):
+        raise ValueError("dynamic_builder must be callable.")
+
     policies: Dict[str, StimBuilder] = {
         "static": static_builder,
         "dynamic": dynamic_builder,
