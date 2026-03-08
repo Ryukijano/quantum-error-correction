@@ -30,7 +30,7 @@ def test_compare_nested_policies_and_tabulation():
         assert np.isfinite(row["logical_error_rate"])
 
 
-@pytest.mark.parametrize("bad_distance", [2, 4, 1.5])
+@pytest.mark.parametrize("bad_distance", [1, 2, 4, 1.5])
 def test_compare_nested_policies_rejects_invalid_distance(bad_distance):
     with pytest.raises(ValueError, match="distance"):
         compare_nested_policies(distance=bad_distance, rounds=3, p=0.001, shots=8)
