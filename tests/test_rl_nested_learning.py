@@ -7,6 +7,16 @@ from surface_code_in_stem.rl_nested_learning import compare_nested_policies, tab
 
 
 def test_compare_nested_policies_and_tabulation():
+    expected_keys = {
+        "builder",
+        "distance",
+        "rounds",
+        "p",
+        "shots",
+        "seed",
+        "logical_error_rate",
+    }
+
     comparison = compare_nested_policies(
         distance=3,
         rounds=3,
@@ -16,7 +26,9 @@ def test_compare_nested_policies_and_tabulation():
     )
 
     assert set(comparison.keys()) == {"static", "dynamic"}
-    for metrics in comparison.values():
+    for policy in ("static", "dynamic"):
+        metrics = comparison[policy]
+        assert set(metrics.keys()) == expected_keys
         assert metrics["distance"] == 3
         assert metrics["rounds"] == 3
         assert metrics["shots"] == 8
@@ -26,6 +38,5 @@ def test_compare_nested_policies_and_tabulation():
     rows = list(tabulate_comparison(comparison))
     assert {row["policy"] for row in rows} == {"static", "dynamic"}
     for row in rows:
-        assert {"policy", "builder", "logical_error_rate"}.issubset(row.keys())
+        assert set(row.keys()) == {"policy", *expected_keys}
         assert np.isfinite(row["logical_error_rate"])
-
