@@ -197,7 +197,6 @@ def initialization_step(distance, p):
     return stim_string
 
 def rounds_step(distance, rounds, p):
-    datas, x_measures, z_measures, c2i = prepare_coords(distance)
     # Use `stabilizers_with_noise` to implement the `REPEAT` block of
     #  stabilizers. Include the mid-round detectors.
     stim_string = f""
