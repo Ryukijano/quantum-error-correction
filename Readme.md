@@ -34,3 +34,11 @@ pip install stim
 
 If Stim is missing, importing `rl_nested_learning` will defer the error until a Stim-powered feature is used, while providing a
 clear installation hint so the module remains importable in lightweight environments.
+
+## Testing
+Install the lightweight test dependencies and set `PYTHONPATH` so the package can be imported from the repository root:
+
+```bash
+pip install pytest numpy stim
+PYTHONPATH=. pytest
+```
