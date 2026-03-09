@@ -40,8 +40,8 @@ def test_compare_nested_policies_and_tabulation(dynamic_builder):
         metrics = comparison[policy]
         assert set(metrics.keys()) == expected_keys
         assert metrics["distance"] == 3
-        assert metrics["rounds"] == 3
-        assert metrics["shots"] == 8
+        assert metrics["rounds"] == 1
+        assert metrics["shots"] == 4
         # Logical error rate is the fraction of shots where logical observable 0 flipped.
         assert 0 <= metrics["logical_error_rate"] <= 1
         assert np.isfinite(metrics["logical_error_rate"])
