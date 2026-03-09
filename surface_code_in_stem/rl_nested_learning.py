@@ -20,15 +20,22 @@ StimBuilder = Callable[[int, int, float], str]
 
 
 def _logical_error_rate(circuit_string: str, shots: int, seed: int | None) -> float:
+    """Estimate logical observable-0 failure probability across sampled shots."""
+
     try:
         import stim
     except ModuleNotFoundError as exc:  # pragma: no cover - handled by tests
         raise ImportError("Stim is required to sample logical error rates.") from exc
 
     circuit = stim.Circuit(circuit_string)
-    detector_sampler = circuit.compile_detector_sampler(seed=seed)
-    detector_samples = detector_sampler.sample(shots)
-    return float(np.mean(np.any(detector_samples, axis=1)))
+    if circuit.num_observables == 0:
+        raise ValueError("Circuit must define observable 0 to estimate logical error rate.")
+
+    sampler = circuit.compile_detector_sampler(seed=seed)
+    _, observable_samples = sampler.sample(shots, separate_observables=True)
+
+    # Logical error rate is the probability that logical observable 0 flips.
+    return float(np.mean(observable_samples[:, 0]))
 
 
 def compare_nested_policies(
