@@ -69,7 +69,7 @@ flowchart TD
         D2 --> DB
         D3 --> DB
 
-        DB --> D4[prepare_coords + adjacent_coords<br/>(imported from static module)]
+        DB --> D4[prepare_coords + adjacent_coords<br/>imported from static module]
         DB --> D5[Stim circuit string with<br/>QUBIT_COORDS / DETECTOR / OBSERVABLE_INCLUDE]
     end
 
@@ -78,8 +78,8 @@ flowchart TD
     %% =========================
     subgraph S3[Policy Comparison / Evaluation]
         B3 --> E1[surface_code_in_stem.rl_nested_learning.compare_nested_policies]
-        E1 --> E2[Build static circuit<br/>(surface_code_circuit_string)]
-        E1 --> E3[Build dynamic circuit<br/>(default: hexagonal_surface_code)]
+        E1 --> E2[Build static circuit<br/>surface_code_circuit_string]
+        E1 --> E3[Build dynamic circuit<br/>default: hexagonal_surface_code]
         E2 --> E4[_logical_error_rate]
         E3 --> E4
         E4 --> E5[stim.Circuit + detector sampler]
