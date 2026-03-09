@@ -41,3 +41,24 @@ def test_compare_nested_policies_and_tabulation():
     for row in rows:
         assert set(row.keys()) == {"policy", *expected_keys}
         assert np.isfinite(row["logical_error_rate"])
+
+
+def test_compare_nested_policies_is_deterministic_with_fixed_seed():
+    first = compare_nested_policies(
+        distance=3,
+        rounds=3,
+        p=0.001,
+        shots=16,
+        seed=123,
+    )
+    second = compare_nested_policies(
+        distance=3,
+        rounds=3,
+        p=0.001,
+        shots=16,
+        seed=123,
+    )
+
+    # Compare explicitly deterministic outputs only.
+    for policy in ("static", "dynamic"):
+        assert first[policy]["logical_error_rate"] == second[policy]["logical_error_rate"]
