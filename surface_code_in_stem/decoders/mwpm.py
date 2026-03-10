@@ -53,7 +53,8 @@ class MWPMDecoder(DecoderProtocol):
         try:
             logicals = self._decode_with_pymatching(events, metadata)
             backend = "pymatching"
-        except (ImportError, ValueError):
+        except ImportError:
+            # Fallback is only used when the optional pymatching dependency is unavailable.
             logicals = self._fallback_decode(events, metadata)
             backend = "fallback"
 
