@@ -41,12 +41,20 @@ def test_mwpm_decoder_output_is_deterministic_for_fixed_inputs():
 def test_union_find_and_sparse_blossom_match_mwpm_on_small_circuit():
     detector_samples, _, metadata = _sample_detector_data()
 
-    mwpm_predictions = MWPMDecoder().decode(detector_samples, metadata).logical_predictions
-    union_find_predictions = UnionFindDecoder().decode(detector_samples, metadata).logical_predictions
-    sparse_predictions = SparseBlossomDecoder().decode(detector_samples, metadata).logical_predictions
+    mwpm_output = MWPMDecoder().decode(detector_samples, metadata)
+    union_find_output = UnionFindDecoder().decode(detector_samples, metadata)
+    sparse_output = SparseBlossomDecoder().decode(detector_samples, metadata)
 
-    np.testing.assert_array_equal(union_find_predictions, mwpm_predictions)
-    np.testing.assert_array_equal(sparse_predictions, mwpm_predictions)
+    np.testing.assert_array_equal(union_find_output.logical_predictions, mwpm_output.logical_predictions)
+    np.testing.assert_array_equal(sparse_output.logical_predictions, mwpm_output.logical_predictions)
+
+    assert union_find_output.decoder_name == "union_find"
+    assert union_find_output.diagnostics.get("algorithm") == "union_find_adapter"
+    assert union_find_output.diagnostics.get("backend") in {"pymatching", "fallback"}
+
+    assert sparse_output.decoder_name == "sparse_blossom"
+    assert sparse_output.diagnostics.get("graph_pruned") is False
+    assert sparse_output.diagnostics.get("backend") in {"pymatching", "fallback"}
 
 
 def test_logical_error_rate_with_decoder_is_seed_deterministic():
