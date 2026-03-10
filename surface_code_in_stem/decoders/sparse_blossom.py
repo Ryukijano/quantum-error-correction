@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from .base import BoolArray, DecoderMetadata, DecoderOutput, DecoderProtocol
@@ -26,13 +26,7 @@ class SparseBlossomDecoder(DecoderProtocol):
             return metadata
 
         pruned_dem = self.graph_pruner(metadata.detector_error_model)
-        return DecoderMetadata(
-            num_observables=metadata.num_observables,
-            detector_error_model=pruned_dem,
-            circuit=metadata.circuit,
-            seed=metadata.seed,
-            extra=metadata.extra,
-        )
+        return replace(metadata, detector_error_model=pruned_dem)
 
     def decode(self, detector_events: BoolArray, metadata: DecoderMetadata) -> DecoderOutput:
         pruned_metadata = self._maybe_prune_metadata(metadata)
