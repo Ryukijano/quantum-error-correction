@@ -8,19 +8,26 @@ without requiring long simulation times.
 
 from __future__ import annotations
 
+from importlib.util import find_spec
 from typing import Callable, Dict, Iterable
 
 import numpy as np
 
 from surface_code_in_stem.dynamic import hexagonal_surface_code
+from surface_code_in_stem.decoders import DecoderMetadata, DecoderProtocol, MWPMDecoder
 from surface_code_in_stem.surface_code import surface_code_circuit_string
 
 
 StimBuilder = Callable[[int, int, float], str]
 
 
-def _logical_error_rate(circuit_string: str, shots: int, seed: int | None) -> float:
-    """Estimate logical observable-0 failure probability across sampled shots."""
+def _logical_error_rate(
+    circuit_string: str,
+    shots: int,
+    seed: int | None,
+    decoder: DecoderProtocol | None = None,
+) -> float:
+    """Estimate post-decoding logical-observable-0 error probability."""
 
     try:
         import stim
@@ -32,10 +39,34 @@ def _logical_error_rate(circuit_string: str, shots: int, seed: int | None) -> fl
         raise ValueError("Circuit must define observable 0 to estimate logical error rate.")
 
     sampler = circuit.compile_detector_sampler(seed=seed)
-    _, observable_samples = sampler.sample(shots, separate_observables=True)
+    detector_samples, observable_samples = sampler.sample(shots, separate_observables=True)
 
-    # Logical error rate is the probability that logical observable 0 flips.
-    return float(np.mean(observable_samples[:, 0]))
+    active_decoder = decoder or MWPMDecoder()
+    metadata = DecoderMetadata(
+        num_observables=circuit.num_observables,
+        detector_error_model=None,
+        circuit=circuit,
+        seed=seed,
+    )
+    if isinstance(active_decoder, MWPMDecoder) and find_spec("pymatching") is not None:
+        metadata.detector_error_model = circuit.detector_error_model(decompose_errors=True)
+    decoded = active_decoder.decode(detector_samples, metadata=metadata)
+
+    # Post-decoding logical error is the residual mismatch between decoder
+    # predictions and the sampled observable values.
+    logical_predictions = np.asarray(decoded.logical_predictions)
+
+    if logical_predictions.shape != observable_samples.shape:
+        raise ValueError(
+            f"Decoder returned logical_predictions with shape {logical_predictions.shape}, "
+            f"but expected {observable_samples.shape} to match observable_samples."
+        )
+
+    if logical_predictions.dtype != observable_samples.dtype:
+        logical_predictions = logical_predictions.astype(observable_samples.dtype, copy=False)
+
+    logical_mismatch = np.logical_xor(logical_predictions, observable_samples)
+    return float(np.mean(logical_mismatch[:, 0]))
 
 
 def compare_nested_policies(
