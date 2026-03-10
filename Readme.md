@@ -9,6 +9,12 @@ This repository contains implementations and simulations of quantum error correc
 ## Structure
 - `introduction_to_stim/`: Lab exercises and tutorials for Stim
 - `surface_code_in_stem/`: Surface code implementation and simulations
+- `codes/`: Code-family plugin system with shared interfaces and a benchmark harness
+  to evaluate multiple families through the same decoder API.
+  - `codes/surface/`: Surface-code plugin + compatibility wrappers around existing builders
+  - `codes/qldpc/`: qLDPC placeholder plugin with explicit parity-check schema
+  - `codes/bosonic/`: Bosonic placeholder plugin scaffold
+  - `codes/dual_rail_erasure/`: Dual-rail erasure placeholder plugin with required parity inputs
 - `surface_code_in_stem/dynamic/`: Stim circuit builders for the hexagonal,
   walking, and iSWAP dynamic surface codes demonstrated in Morvan et al.
   (Nature Physics, 2025). See `surface_code_in_stem/DYNAMIC_CODES.md` for a
