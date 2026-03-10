@@ -43,10 +43,12 @@ def _logical_error_rate(
     active_decoder = decoder or MWPMDecoder()
     metadata = DecoderMetadata(
         num_observables=circuit.num_observables,
-        detector_error_model=circuit.detector_error_model(decompose_errors=True),
+        detector_error_model=None,
         circuit=circuit,
         seed=seed,
     )
+    if isinstance(active_decoder, MWPMDecoder):
+        metadata.detector_error_model = circuit.detector_error_model(decompose_errors=True)
     decoded = active_decoder.decode(detector_samples, metadata=metadata)
 
     # Post-decoding logical error is the residual mismatch between decoder
