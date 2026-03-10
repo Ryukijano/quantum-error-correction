@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
-import networkx as nx
 import numpy as np
 
 
@@ -64,6 +63,9 @@ class WeightedMWPMDecoder:
     ``w' = w * (1 + confidence_scale * (1 - mean_endpoint_confidence))``
 
     so low-confidence measurements get larger effective costs.
+
+    ``decode_batch`` returns an array of shape ``(shots, num_fault_ids)``
+    containing the predicted observable flips for every shot.
     """
 
     def __init__(self, detector_error_model: object, *, confidence_scale: float = 1.0) -> None:
@@ -78,43 +80,94 @@ class WeightedMWPMDecoder:
         self._pymatching = pymatching
         self._confidence_scale = float(confidence_scale)
         self._base_matching = pymatching.Matching.from_detector_error_model(detector_error_model)
+
+        # Number of detector nodes; the boundary placeholder index equals this value.
+        self._num_detectors: int = self._base_matching.num_detectors
+
+        # Determine the number of observable fault IDs from the base matching.
+        _zero_syndrome = np.zeros(self._num_detectors, dtype=np.uint8)
+        self._num_fault_ids: int = len(self._base_matching.decode(_zero_syndrome))
+
+        # --- Precompute edge data for vectorized per-shot weight adjustment ---
+        # The base graph is retained for per-shot copies; this preserves all
+        # detector nodes (including any that have no edges in the MWPM graph).
+        # Edge endpoints and base weights are extracted once so the hot-path
+        # confidence computation can be fully vectorised with NumPy.
         self._base_graph = self._base_matching.to_networkx()
+        boundary = self._num_detectors
 
-    def _confidence_adjusted_graph(self, shot_confidence: np.ndarray) -> nx.Graph:
-        """Create a per-shot graph with edge weights adjusted by confidence."""
+        edges_u: list[int] = []
+        edges_v: list[int] = []
+        base_weights: list[float] = []
 
-        graph = self._base_graph.copy()
-        boundary_node = self._base_matching.num_detectors
+        for u, v, data in self._base_graph.edges(data=True):
+            edges_u.append(int(u))
+            edges_v.append(int(v))
+            base_weights.append(float(data.get("weight", 1.0)))
 
-        for u, v, data in graph.edges(data=True):
-            base_weight = float(data["weight"])
-            conf_terms = []
-            if u != boundary_node:
-                conf_terms.append(float(shot_confidence[u]))
-            if v != boundary_node:
-                conf_terms.append(float(shot_confidence[v]))
+        # np.intp matches NumPy's native index type, avoiding implicit casts
+        # during fancy-indexing into shot_confidence arrays.
+        self._edge_u = np.array(edges_u, dtype=np.intp)
+        self._edge_v = np.array(edges_v, dtype=np.intp)
+        self._base_weights = np.array(base_weights, dtype=np.float64)
+        # Ordered (u, v) pairs matching the arrays above, for O(E) weight updates.
+        self._edge_pairs: list[tuple[int, int]] = list(zip(edges_u, edges_v))
 
-            mean_confidence = float(np.mean(conf_terms)) if conf_terms else 1.0
-            scale = 1.0 + self._confidence_scale * (1.0 - mean_confidence)
-            data["weight"] = base_weight * scale
+        # Boolean masks: True when the endpoint is a real detector node.
+        self._u_is_det: np.ndarray = self._edge_u != boundary
+        self._v_is_det: np.ndarray = self._edge_v != boundary
 
-        return graph
+        # Safe index arrays: replace the out-of-range boundary placeholder with
+        # index 0 so numpy fancy-indexing never goes out of bounds; the boolean
+        # masks ensure those slots contribute nothing to the confidence mean.
+        self._edge_u_safe = np.where(self._u_is_det, self._edge_u, 0)
+        self._edge_v_safe = np.where(self._v_is_det, self._edge_v, 0)
+
+    def _compute_adjusted_weights(self, shot_confidence: np.ndarray) -> np.ndarray:
+        """Return edge weights adjusted by per-detector confidence (vectorized).
+
+        All per-edge arithmetic is done with NumPy so no Python-level loop over
+        edges is needed.
+        """
+        conf_u = np.where(self._u_is_det, shot_confidence[self._edge_u_safe], 1.0)
+        conf_v = np.where(self._v_is_det, shot_confidence[self._edge_v_safe], 1.0)
+
+        num_real_endpoints = self._u_is_det.astype(np.float64) + self._v_is_det.astype(np.float64)
+        mean_conf = np.where(
+            num_real_endpoints > 0,
+            (conf_u * self._u_is_det + conf_v * self._v_is_det) / np.maximum(num_real_endpoints, 1.0),
+            1.0,
+        )
+        scale = 1.0 + self._confidence_scale * (1.0 - mean_conf)
+        return self._base_weights * scale
 
     def decode_batch(self, syndromes: SyndromeBatch) -> np.ndarray:
-        """Decode each shot, optionally consuming confidence values."""
+        """Decode each shot and return predictions shaped ``(shots, num_fault_ids)``.
 
+        When ``syndromes.confidence`` is ``None`` the base matching (without
+        any weight adjustments) is used for every shot, which is equivalent to
+        passing an all-ones confidence array.
+        """
         hard = syndromes.hard_bits
         confidence = syndromes.confidence
-        predictions = np.zeros((hard.shape[0],), dtype=np.uint8)
+        shots = hard.shape[0]
+        predictions = np.zeros((shots, self._num_fault_ids), dtype=np.uint8)
 
         if confidence is None:
             for shot_ix, shot in enumerate(hard):
-                predictions[shot_ix] = self._base_matching.decode(shot)[0]
+                predictions[shot_ix] = self._base_matching.decode(shot)
             return predictions
 
         for shot_ix, (shot, shot_confidence) in enumerate(zip(hard, confidence, strict=True)):
-            weighted_graph = self._confidence_adjusted_graph(shot_confidence)
-            matching = self._pymatching.Matching(weighted_graph)
-            predictions[shot_ix] = matching.decode(shot)[0]
+            adjusted_weights = self._compute_adjusted_weights(shot_confidence)
+            # Copy the base graph and apply precomputed weights.  Copying rather
+            # than building from scratch preserves isolated detector nodes (those
+            # with no edges in the MWPM graph) so that syndrome arrays of full
+            # length num_detectors are accepted by pymatching.
+            graph = self._base_graph.copy()
+            for i, (u, v) in enumerate(self._edge_pairs):
+                graph[u][v]["weight"] = float(adjusted_weights[i])
+            matching = self._pymatching.Matching(graph)
+            predictions[shot_ix] = matching.decode(shot)
 
         return predictions

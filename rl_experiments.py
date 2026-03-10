@@ -43,7 +43,7 @@ def _simulate_circuit_for_confidence_demo(
 
     sampler = circuit.compile_detector_sampler(seed=seed)
     dets, observables = sampler.sample(shots=shots, separate_observables=True)
-    return np.asarray(dets, dtype=np.uint8), np.asarray(observables[:, 0], dtype=np.uint8)
+    return np.asarray(dets, dtype=np.uint8), np.asarray(observables, dtype=np.uint8)
 
 
 def _synthetic_confidence_from_syndromes(
