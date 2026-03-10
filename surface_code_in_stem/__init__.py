@@ -9,6 +9,13 @@ from .dynamic_surface_codes import (
     walking_surface_code,
 )
 from .rl_nested_learning import compare_nested_policies, tabulate_comparison
+from .rl_control import (
+    PEPGOptimizer,
+    StimCalibrationConfig,
+    StimCalibrationEnvironment,
+    TrainingConfig,
+    run_simulator_training,
+)
 
 __all__ = [
     "surface_code_circuit_string",
@@ -19,5 +26,10 @@ __all__ = [
     "walking_surface_code",
     "compare_nested_policies",
     "tabulate_comparison",
+    "StimCalibrationConfig",
+    "StimCalibrationEnvironment",
+    "PEPGOptimizer",
+    "TrainingConfig",
+    "run_simulator_training",
 ]
 
