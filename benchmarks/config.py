@@ -32,7 +32,10 @@ def _read_raw_spec(path: Path) -> dict[str, Any]:
     """Read a benchmark specification from YAML or JSON."""
     suffix = path.suffix.lower()
     if suffix == ".json":
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError(f"JSON spec must map to a dictionary: {path}")
+        return data
     if suffix in {".yaml", ".yml"}:
         data = yaml.safe_load(path.read_text())
         if not isinstance(data, dict):

@@ -3,9 +3,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import json
 import math
 
 import pandas as pd
+import pytest
 
 from benchmarks.config import load_spec
 from benchmarks.models import suppression_factors
@@ -44,3 +46,12 @@ def test_run_spec_outputs_expected_metrics(tmp_path):
     assert isinstance(df, pd.DataFrame)
     assert (tmp_path / f"{spec.output_prefix}.csv").exists()
     assert (tmp_path / f"{spec.output_prefix}.png").exists()
+
+
+def test_load_spec_json_non_dict_raises(tmp_path):
+    """JSON specs that are not a dict should raise ValueError, not AttributeError."""
+    for bad_value in [["item1", "item2"], "just a string", 42]:
+        bad_spec = tmp_path / "bad.json"
+        bad_spec.write_text(json.dumps(bad_value))
+        with pytest.raises(ValueError, match="JSON spec must map to a dictionary"):
+            load_spec(bad_spec)
