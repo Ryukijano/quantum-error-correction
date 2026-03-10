@@ -9,6 +9,7 @@ from surface_code_in_stem.decoders import (
     SparseBlossomDecoder,
     UnionFindDecoder,
 )
+from surface_code_in_stem.decoders.mwpm import PymatchingConfigurationError
 from surface_code_in_stem.rl_nested_learning import _logical_error_rate
 from surface_code_in_stem.surface_code import surface_code_circuit_string
 
@@ -56,3 +57,33 @@ def test_logical_error_rate_with_decoder_is_seed_deterministic():
     second = _logical_error_rate(circuit_string, shots=16, seed=123, decoder=MWPMDecoder())
 
     assert first == second
+
+
+def test_mwpm_decoder_does_not_mask_unexpected_value_error(monkeypatch):
+    decoder = MWPMDecoder()
+    metadata = DecoderMetadata(num_observables=1)
+    detector_events = np.zeros((2, 1), dtype=bool)
+
+    def boom(*_: object) -> None:
+        raise ValueError("unexpected pymatching failure")
+
+    monkeypatch.setattr(decoder, "_decode_with_pymatching", boom)
+
+    with pytest.raises(ValueError):
+        decoder.decode(detector_events, metadata)
+
+
+def test_mwpm_decoder_falls_back_on_expected_configuration_issue(monkeypatch):
+    decoder = MWPMDecoder()
+    metadata = DecoderMetadata(num_observables=2)
+    detector_events = np.zeros((3, 1), dtype=bool)
+
+    def missing_dem(*_: object) -> None:
+        raise PymatchingConfigurationError("no detector error model provided")
+
+    monkeypatch.setattr(decoder, "_decode_with_pymatching", missing_dem)
+
+    output = decoder.decode(detector_events, metadata)
+
+    np.testing.assert_array_equal(output.logical_predictions, np.zeros((3, 2), dtype=bool))
+    assert output.diagnostics["backend"] == "fallback"

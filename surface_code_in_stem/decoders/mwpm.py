@@ -15,6 +15,10 @@ import numpy as np
 from .base import BoolArray, DecoderMetadata, DecoderOutput, DecoderProtocol
 
 
+class PymatchingConfigurationError(Exception):
+    """Raised when pymatching cannot be used due to missing configuration."""
+
+
 @dataclass
 class MWPMDecoder(DecoderProtocol):
     """MWPM decoder with a PyMatching-compatible detector-error-model path."""
@@ -30,7 +34,9 @@ class MWPMDecoder(DecoderProtocol):
             raise ImportError("pymatching is not installed") from exc
 
         if metadata.detector_error_model is None:
-            raise ValueError("MWPMDecoder requires detector_error_model in metadata for pymatching path.")
+            raise PymatchingConfigurationError(
+                "MWPMDecoder requires detector_error_model in metadata for pymatching path."
+            )
 
         matching = Matching.from_detector_error_model(metadata.detector_error_model)
         predictions = matching.decode_batch(detector_events)
@@ -53,7 +59,7 @@ class MWPMDecoder(DecoderProtocol):
         try:
             logicals = self._decode_with_pymatching(events, metadata)
             backend = "pymatching"
-        except (ImportError, ValueError):
+        except (ImportError, PymatchingConfigurationError):
             logicals = self._fallback_decode(events, metadata)
             backend = "fallback"
 
