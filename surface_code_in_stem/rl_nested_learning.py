@@ -51,8 +51,18 @@ def _logical_error_rate(
 
     # Post-decoding logical error is the residual mismatch between decoder
     # predictions and the sampled observable values.
-    logical_mismatch = np.logical_xor(decoded.logical_predictions, observable_samples)
+    logical_predictions = np.asarray(decoded.logical_predictions)
 
+    if logical_predictions.shape != observable_samples.shape:
+        raise ValueError(
+            f"Decoder returned logical_predictions with shape {logical_predictions.shape}, "
+            f"but expected {observable_samples.shape} to match observable_samples."
+        )
+
+    if logical_predictions.dtype != observable_samples.dtype:
+        logical_predictions = logical_predictions.astype(observable_samples.dtype, copy=False)
+
+    logical_mismatch = np.logical_xor(logical_predictions, observable_samples)
     return float(np.mean(logical_mismatch[:, 0]))
 
 
