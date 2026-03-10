@@ -9,8 +9,9 @@ terminal logical observable constructed from a boundary measurement.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from surface_code_in_stem.noise_models import NoiseModel, resolve_noise_model
 from surface_code_in_stem.surface_code import adjacent_coords, prepare_coords
 
 Coord = Tuple[float, float]
@@ -74,19 +75,23 @@ def index_string(coords: Iterable[Coord], c2i: Dict[Coord, int]) -> str:
     return " ".join(str(c2i[c]) for c in coords)
 
 
-def noisy_layer(builder: StimStringBuilder, gate: str, pairs: List[int], p: float) -> None:
+def noisy_layer(
+    builder: StimStringBuilder,
+    gate: str,
+    pairs: List[int],
+    idle_qubits: Sequence[int],
+    noise_model: NoiseModel,
+    layer_id: str,
+) -> None:
     if not pairs:
         return
     targets = " ".join(map(str, pairs))
     builder.add(f"{gate} {targets}")
-    builder.add(f"DEPOLARIZE2({p}) {targets}")
+    for line in noise_model.gate_noise(
+        gate=gate, pair_targets=pairs, idle_targets=idle_qubits, layer_id=layer_id
+    ):
+        builder.add(line)
     builder.add("TICK")
-
-
-def single_qubit_noise(builder: StimStringBuilder, qubits: Sequence[int], p: float) -> None:
-    if not qubits:
-        return
-    builder.add(f"DEPOLARIZE1({p}) {' '.join(map(str, qubits))}")
 
 
 def orientation_pairs(
@@ -108,6 +113,7 @@ def stabilizer_cycle(
     p: float,
     orientations: Sequence[int],
     gate: str,
+    noise_model: Optional[NoiseModel] = None,
     reset_data: bool = False,
     measure_data: bool = False,
     prev_meas: Dict[Coord, int] | None = None,
@@ -119,31 +125,39 @@ def stabilizer_cycle(
         layout.z_measures,
         layout.coord_to_index,
     )
+    noise_model = resolve_noise_model(p, noise_model)
     measure_qubits = x_measures + z_measures
     all_qubits = datas + measure_qubits
 
     reset_targets = measure_qubits + (datas if reset_data else [])
     if reset_targets:
         builder.add(f"R {index_string(reset_targets, c2i)}")
-        builder.add(f"X_ERROR({p}) {index_string(reset_targets, c2i)}")
+        for line in noise_model.reset_noise(qubits=[c2i[q] for q in reset_targets], layer_id="dynamic_reset"):
+            builder.add(line)
         builder.add("TICK")
 
     builder.add(f"H {index_string(x_measures, c2i)}")
-    single_qubit_noise(builder, [c2i[q] for q in all_qubits], p)
+    for line in noise_model.gate_noise(gate="H", pair_targets=[], idle_targets=[c2i[q] for q in all_qubits], layer_id="dynamic_h_pre"):
+        builder.add(line)
     builder.add("TICK")
 
     reorder = [0, 2, 1, 3]
     for orient in orientations:
         cz_pairs = orientation_pairs(z_measures, orient, c2i)
         cx_pairs = orientation_pairs(x_measures, orient, c2i, reorder=reorder)
-        noisy_layer(builder, gate, cz_pairs, p)
-        noisy_layer(builder, gate, cx_pairs, p)
+        active_pair_targets = set(cz_pairs) | set(cx_pairs)
+        idle_targets = [c2i[q] for q in all_qubits if c2i[q] not in active_pair_targets]
+        noisy_layer(builder, gate, cz_pairs, idle_targets, noise_model, f"dynamic_z_orient_{orient}")
+        noisy_layer(builder, gate, cx_pairs, idle_targets, noise_model, f"dynamic_x_orient_{orient}")
 
     builder.add(f"H {index_string(x_measures, c2i)}")
-    single_qubit_noise(builder, [c2i[q] for q in all_qubits], p)
+    for line in noise_model.gate_noise(gate="H", pair_targets=[], idle_targets=[c2i[q] for q in all_qubits], layer_id="dynamic_h_post"):
+        builder.add(line)
     builder.add("TICK")
 
     measurement_targets = measure_qubits + (datas if measure_data else [])
+    for line in noise_model.measurement_noise(qubits=[c2i[q] for q in measurement_targets], layer_id="dynamic_measure"):
+        builder.add(line)
     record_indices = builder.measure([c2i[q] for q in measurement_targets])
     coord_order = measure_qubits + (datas if measure_data else [])
     coord_to_rec = {coord: idx for coord, idx in zip(coord_order, record_indices)}

@@ -1,12 +1,14 @@
 """Walking dynamic surface code circuit builder."""
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
+
+from surface_code_in_stem.noise_models import NoiseModel
 
 from .base import DynamicLayout, StimStringBuilder, stabilizer_cycle
 
 
-def walking_surface_code(distance: int, rounds: int, p: float) -> str:
+def walking_surface_code(distance: int, rounds: int, p: float, noise_model: Optional[NoiseModel] = None) -> str:
     """Return a Stim circuit string for the walking surface code.
 
     Each cycle swaps which sublattice receives a reset so that every physical
@@ -30,6 +32,7 @@ def walking_surface_code(distance: int, rounds: int, p: float) -> str:
             p=p,
             orientations=orientations,
             gate="CX",
+            noise_model=noise_model,
             reset_data=reset_data,
             measure_data=measure_data,
             prev_meas=prev_meas,
