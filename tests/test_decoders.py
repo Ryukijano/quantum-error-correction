@@ -38,6 +38,16 @@ def test_mwpm_decoder_output_is_deterministic_for_fixed_inputs():
     np.testing.assert_array_equal(first, second)
 
 
+def test_mwpm_decoder_reports_pymatching_backend_when_available():
+    pytest.importorskip("pymatching")
+
+    detector_samples, observable_samples, metadata = _sample_detector_data(shots=32, p=0.01)
+    output = MWPMDecoder().decode(detector_samples, metadata)
+
+    assert output.diagnostics["backend"] == "pymatching"
+    assert output.logical_predictions.shape == observable_samples.shape
+
+
 def test_union_find_and_sparse_blossom_match_mwpm_on_small_circuit():
     detector_samples, _, metadata = _sample_detector_data()
 
