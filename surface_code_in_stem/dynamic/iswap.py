@@ -1,12 +1,14 @@
 """iSWAP-native dynamic surface code circuit builder."""
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
+
+from surface_code_in_stem.noise_models import NoiseModel
 
 from .base import DynamicLayout, StimStringBuilder, stabilizer_cycle
 
 
-def iswap_surface_code(distance: int, rounds: int, p: float) -> str:
+def iswap_surface_code(distance: int, rounds: int, p: float, noise_model: Optional[NoiseModel] = None) -> str:
     """Return a Stim circuit string for the iSWAP-native dynamic surface code.
 
     Forward cycles use one orientation ordering while odd cycles reverse it to
@@ -31,6 +33,7 @@ def iswap_surface_code(distance: int, rounds: int, p: float) -> str:
             p=p,
             orientations=orient,
             gate="ISWAP",
+            noise_model=noise_model,
             reset_data=False,
             measure_data=False,
             prev_meas=prev_meas,
