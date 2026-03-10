@@ -1,0 +1,10 @@
+name: overhead_surface_vs_qldpc
+benchmark_type: overhead_comparison
+output_prefix: overhead_surface_vs_qldpc
+parameters:
+  distances: [3, 5, 7, 9, 11]
+  physical_error_rate: 0.001
+  surface_threshold: 0.01
+  qldpc_threshold: 0.005
+  qldpc_alpha: 0.4
+  qldpc_rate: 0.1

@@ -1,0 +1,7 @@
+name: threshold_sweep_surface
+benchmark_type: threshold_sweep
+output_prefix: threshold_sweep_surface
+parameters:
+  distances: [3, 5, 7, 9]
+  physical_error_rates: [0.0003, 0.0006, 0.001, 0.002, 0.003]
+  threshold: 0.01

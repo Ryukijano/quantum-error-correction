@@ -96,3 +96,15 @@ flowchart TD
     F4 --> D0
     F4 --> E1
 ```
+
+
+## Benchmarking
+
+Structured benchmark specs live in `benchmarks/specs/` and can be executed through a single CLI entrypoint:
+
+```bash
+python -m benchmarks benchmarks/specs/threshold_sweep.yaml benchmarks/specs/distance_scaling.yaml
+```
+
+Each run writes CSV metrics and PNG plots to `benchmarks/results/` by default.
+See `benchmarks/reproduce.md` for a mapping between templates and literature claims/caveats.

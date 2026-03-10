@@ -1,0 +1,9 @@
+{
+  "name": "repetition_exponential_suppression",
+  "benchmark_type": "repetition_suppression",
+  "output_prefix": "repetition_exponential_suppression",
+  "parameters": {
+    "distances": [3, 5, 7, 9],
+    "physical_error_rates": [0.001, 0.002, 0.005]
+  }
+}

@@ -1,0 +1,7 @@
+name: distance_scaling_surface
+benchmark_type: distance_scaling
+output_prefix: distance_scaling_surface
+parameters:
+  distances: [3, 5, 7, 9, 11]
+  physical_error_rate: 0.001
+  threshold: 0.01
