@@ -13,14 +13,20 @@ from typing import Callable, Dict, Iterable
 import numpy as np
 
 from surface_code_in_stem.dynamic import hexagonal_surface_code
+from surface_code_in_stem.decoders import DecoderMetadata, DecoderProtocol, MWPMDecoder
 from surface_code_in_stem.surface_code import surface_code_circuit_string
 
 
 StimBuilder = Callable[[int, int, float], str]
 
 
-def _logical_error_rate(circuit_string: str, shots: int, seed: int | None) -> float:
-    """Estimate logical observable-0 failure probability across sampled shots."""
+def _logical_error_rate(
+    circuit_string: str,
+    shots: int,
+    seed: int | None,
+    decoder: DecoderProtocol | None = None,
+) -> float:
+    """Estimate post-decoding logical-observable-0 error probability."""
 
     try:
         import stim
@@ -32,10 +38,22 @@ def _logical_error_rate(circuit_string: str, shots: int, seed: int | None) -> fl
         raise ValueError("Circuit must define observable 0 to estimate logical error rate.")
 
     sampler = circuit.compile_detector_sampler(seed=seed)
-    _, observable_samples = sampler.sample(shots, separate_observables=True)
+    detector_samples, observable_samples = sampler.sample(shots, separate_observables=True)
 
-    # Logical error rate is the probability that logical observable 0 flips.
-    return float(np.mean(observable_samples[:, 0]))
+    active_decoder = decoder or MWPMDecoder()
+    metadata = DecoderMetadata(
+        num_observables=circuit.num_observables,
+        detector_error_model=circuit.detector_error_model(decompose_errors=True),
+        circuit=circuit,
+        seed=seed,
+    )
+    decoded = active_decoder.decode(detector_samples, metadata=metadata)
+
+    # Post-decoding logical error is the residual mismatch between decoder
+    # predictions and the sampled observable values.
+    logical_mismatch = np.logical_xor(decoded.logical_predictions, observable_samples)
+
+    return float(np.mean(logical_mismatch[:, 0]))
 
 
 def compare_nested_policies(
