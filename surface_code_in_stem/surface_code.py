@@ -1,5 +1,10 @@
 # ============================
 # Provided utility functions
+from __future__ import annotations
+
+from typing import Iterable, List, Optional
+
+from surface_code_in_stem.noise_models import NoiseModel, resolve_noise_model
 
 def data_coords(distance):
     # Returns coordinate pairs from (1,1) to (distance,distance).
@@ -100,11 +105,18 @@ def label_indices(distance):
 # ======================================================
 # hidden answer functions
 
-def lattice_with_noise(distance, p):
+def _extend_noise(lines: List[str], noise_lines: Iterable[str]) -> None:
+    for line in noise_lines:
+        if line:
+            lines.append(line)
+
+
+def lattice_with_noise(distance, p, noise_model: Optional[NoiseModel] = None):
+    noise_model = resolve_noise_model(p, noise_model)
     datas, x_measures, z_measures, c2i = prepare_coords(distance)
     # create a stim circuit string for just the lattice of CX gates
     #  required by the stabilizers.
-    stim_string = f""
+    lines: List[str] = []
     for i in range(4):
         cx_qubits = []
         for measure in z_measures:
@@ -122,81 +134,119 @@ def lattice_with_noise(distance, p):
 
         idle_qubits = [coord for coord in c2i.keys() if coord not in cx_qubits]
 
-        stim_string += f"""
-        CX {index_string(cx_qubits, c2i)}
-        DEPOLARIZE2({p}) {index_string(cx_qubits, c2i)}
-        DEPOLARIZE1({p}) {index_string(idle_qubits, c2i)}
-        TICK
-        """
+        pair_indices = [c2i[q] for q in cx_qubits]
+        idle_indices = [c2i[q] for q in idle_qubits]
+        lines.append(f"CX {' '.join(map(str, pair_indices))}")
+        _extend_noise(
+            lines,
+            noise_model.gate_noise(
+                gate="CX",
+                pair_targets=pair_indices,
+                idle_targets=idle_indices,
+                layer_id=f"lattice_orient_{i}",
+            ),
+        )
+        lines.append("TICK")
 
-    return stim_string
+    return "\n".join(lines) + "\n"
 
 
-def stabilizers_with_noise(distance, p):
+def stabilizers_with_noise(distance, p, noise_model: Optional[NoiseModel] = None):
+    noise_model = resolve_noise_model(p, noise_model)
     datas, x_measures, z_measures, c2i = prepare_coords(distance)
     all_measures = x_measures + z_measures
     all_qubits = datas + all_measures
     # Use `lattice_with_noise` to create a full lattice of stabilizers
     #  including the resets and measurements. No detectors yet.
-    stim_string = f""
-    stim_string = f"""
-    R {index_string(all_measures, c2i)}
-    X_ERROR({p}) {index_string(all_measures, c2i)}
-    DEPOLARIZE1({p}) {index_string(datas, c2i)}
-    TICK
-    H {index_string(x_measures, c2i)}
-    DEPOLARIZE1({p}) {index_string(all_qubits, c2i)}
-    TICK
-    """
+    lines = [f"R {index_string(all_measures, c2i)}"]
+    _extend_noise(lines, noise_model.reset_noise(qubits=[c2i[q] for q in all_measures], layer_id="stabilizer_reset"))
+    _extend_noise(
+        lines,
+        noise_model.gate_noise(
+            gate="IDLE",
+            pair_targets=[],
+            idle_targets=[c2i[q] for q in datas],
+            layer_id="stabilizer_post_reset_idle",
+        ),
+    )
+    lines.append("TICK")
+    lines.append(f"H {index_string(x_measures, c2i)}")
+    _extend_noise(
+        lines,
+        noise_model.gate_noise(
+            gate="H",
+            pair_targets=[],
+            idle_targets=[c2i[q] for q in all_qubits],
+            layer_id="stabilizer_h_pre",
+        ),
+    )
+    lines.append("TICK")
 
-    stim_string += lattice_with_noise(distance, p)
+    lines.append(lattice_with_noise(distance, p, noise_model=noise_model).strip())
 
-    stim_string += f"""
-    H {index_string(x_measures, c2i)}
-    DEPOLARIZE1({p}) {index_string(all_qubits, c2i)}
-    TICK
-    X_ERROR({p}) {index_string(all_measures, c2i)}
-    DEPOLARIZE1({p}) {index_string(datas, c2i)}
-    M {index_string(all_measures, c2i)}
-    TICK
-    """
+    lines.append(f"H {index_string(x_measures, c2i)}")
+    _extend_noise(
+        lines,
+        noise_model.gate_noise(
+            gate="H",
+            pair_targets=[],
+            idle_targets=[c2i[q] for q in all_qubits],
+            layer_id="stabilizer_h_post",
+        ),
+    )
+    lines.append("TICK")
+    _extend_noise(lines, noise_model.measurement_noise(qubits=[c2i[q] for q in all_measures], layer_id="stabilizer_meas"))
+    _extend_noise(
+        lines,
+        noise_model.gate_noise(
+            gate="IDLE",
+            pair_targets=[],
+            idle_targets=[c2i[q] for q in datas],
+            layer_id="stabilizer_pre_meas_idle",
+        ),
+    )
+    lines.append(f"M {index_string(all_measures, c2i)}")
+    lines.append("TICK")
 
-    return stim_string
+    return "\n".join(lines) + "\n"
 
-def initialization_step(distance, p):
+def initialization_step(distance, p, noise_model: Optional[NoiseModel] = None):
+    noise_model = resolve_noise_model(p, noise_model)
     datas, x_measures, z_measures, c2i = prepare_coords(distance)
     all_measures = x_measures + z_measures
     all_qubits = datas + all_measures
     # Use `lattice_with_noise` to create the first round of stabilizer
     #  measurements in the surface code. Reference but don't use
     #  `stabilizers_with_noise`. Add first-round detectors.
-    stim_string = f""
-    stim_string = f"""
-    R {index_string(all_qubits, c2i)}
-    X_ERROR({p}) {index_string(all_qubits, c2i)}
-    TICK
-    H {index_string(x_measures, c2i)}
-    DEPOLARIZE1({p}) {index_string(all_qubits, c2i)}
-    TICK
-    """
+    lines = [f"R {index_string(all_qubits, c2i)}"]
+    _extend_noise(lines, noise_model.reset_noise(qubits=[c2i[q] for q in all_qubits], layer_id="init_reset"))
+    lines.append("TICK")
+    lines.append(f"H {index_string(x_measures, c2i)}")
+    _extend_noise(
+        lines,
+        noise_model.gate_noise(gate="H", pair_targets=[], idle_targets=[c2i[q] for q in all_qubits], layer_id="init_h_pre"),
+    )
+    lines.append("TICK")
 
-    stim_string += lattice_with_noise(distance, p)
+    lines.append(lattice_with_noise(distance, p, noise_model=noise_model).strip())
 
-    stim_string += f"""
-    H {index_string(x_measures, c2i)}
-    DEPOLARIZE1({p}) {index_string(all_qubits, c2i)}
-    TICK
-    X_ERROR({p}) {index_string(all_measures, c2i)}
-    M {index_string(all_measures, c2i)}
-    DEPOLARIZE1({p}) {index_string(datas, c2i)}
-    TICK
-    """
+    lines.append(f"H {index_string(x_measures, c2i)}")
+    _extend_noise(
+        lines,
+        noise_model.gate_noise(gate="H", pair_targets=[], idle_targets=[c2i[q] for q in all_qubits], layer_id="init_h_post"),
+    )
+    lines.append("TICK")
+    _extend_noise(lines, noise_model.measurement_noise(qubits=[c2i[q] for q in all_measures], layer_id="init_meas"))
+    lines.append(f"M {index_string(all_measures, c2i)}")
+    _extend_noise(lines, noise_model.gate_noise(gate="IDLE", pair_targets=[], idle_targets=[c2i[q] for q in datas], layer_id="init_meas_data_idle"))
+    lines.append("TICK")
 
     for i in range(1, len(z_measures) + 1):
-        stim_string += f"DETECTOR({i}, 0) rec[{-i}]\n"
-    return stim_string
+        lines.append(f"DETECTOR({i}, 0) rec[{-i}]")
+    return "\n".join(lines) + "\n"
 
-def rounds_step(distance, rounds, p):
+def rounds_step(distance, rounds, p, noise_model: Optional[NoiseModel] = None):
+    noise_model = resolve_noise_model(p, noise_model)
     # Use `stabilizers_with_noise` to implement the `REPEAT` block of
     #  stabilizers. Include the mid-round detectors.
     stim_string = f""
@@ -205,7 +255,7 @@ def rounds_step(distance, rounds, p):
     datas, x_measures, z_measures, c2i = prepare_coords(distance)
 
     stim_string = f"REPEAT {rounds-2} {{\n"
-    stim_string += stabilizers_with_noise(distance, p)
+    stim_string += stabilizers_with_noise(distance, p, noise_model=noise_model)
 
     num_measures_per_type = len(z_measures) # number of measures per type per round
     for i in range(1, num_measures_per_type + 1): # offset to the previous round
@@ -219,7 +269,8 @@ def rounds_step(distance, rounds, p):
 
     return stim_string
     
-def final_step(distance, p):
+def final_step(distance, p, noise_model: Optional[NoiseModel] = None):
+    noise_model = resolve_noise_model(p, noise_model)
     datas, x_measures, z_measures, c2i = prepare_coords(distance)
     all_measures = x_measures + z_measures
     all_qubits = datas + all_measures
@@ -227,34 +278,29 @@ def final_step(distance, p):
     #  measurements and the final data measurements. Add the last round
     #  detectors, the final data measure detectors, and the
     #  `OBSERVABLE_INCLUDE` instruction.
-    stim_string = f""
-    stim_string = f"""
-    R {index_string(all_measures, c2i)}
-    X_ERROR({p}) {index_string(all_measures, c2i)}
-    DEPOLARIZE1({p}) {index_string(datas, c2i)}
-    TICK
-    H {index_string(x_measures, c2i)}
-    DEPOLARIZE1({p}) {index_string(all_qubits, c2i)}
-    TICK
-    """
+    lines = [f"R {index_string(all_measures, c2i)}"]
+    _extend_noise(lines, noise_model.reset_noise(qubits=[c2i[q] for q in all_measures], layer_id="final_reset"))
+    _extend_noise(lines, noise_model.gate_noise(gate="IDLE", pair_targets=[], idle_targets=[c2i[q] for q in datas], layer_id="final_reset_data_idle"))
+    lines.append("TICK")
+    lines.append(f"H {index_string(x_measures, c2i)}")
+    _extend_noise(lines, noise_model.gate_noise(gate="H", pair_targets=[], idle_targets=[c2i[q] for q in all_qubits], layer_id="final_h_pre"))
+    lines.append("TICK")
 
-    stim_string += lattice_with_noise(distance, p)
+    lines.append(lattice_with_noise(distance, p, noise_model=noise_model).strip())
 
-    stim_string += f"""
-    H {index_string(x_measures, c2i)}
-    DEPOLARIZE1({p}) {index_string(all_qubits, c2i)}
-    TICK
-    X_ERROR({p}) {index_string(all_qubits, c2i)}
-    M {index_string(all_qubits, c2i)}
-    """
+    lines.append(f"H {index_string(x_measures, c2i)}")
+    _extend_noise(lines, noise_model.gate_noise(gate="H", pair_targets=[], idle_targets=[c2i[q] for q in all_qubits], layer_id="final_h_post"))
+    lines.append("TICK")
+    _extend_noise(lines, noise_model.measurement_noise(qubits=[c2i[q] for q in all_qubits], layer_id="final_measurement"))
+    lines.append(f"M {index_string(all_qubits, c2i)}")
     # remember measure order is datas, x_measures, z_measures
     # do previous-round detectors first
     num_measures_per_type = len(z_measures) # number of measures per type per round
     num_datas = len(datas)
     for i in range(1, num_measures_per_type + 1): # offset to the previous round
-        stim_string += f"DETECTOR({i}, 0) rec[{-i}] rec[{-(i+2*num_measures_per_type+num_datas)}]\n"
+        lines.append(f"DETECTOR({i}, 0) rec[{-i}] rec[{-(i+2*num_measures_per_type+num_datas)}]")
     for i in range(1, num_measures_per_type + 1): # offset to the other type and to the previous round
-        stim_string += f"DETECTOR({i}, 0) rec[{-(i+num_measures_per_type)}] rec[{-(i+3*num_measures_per_type+num_datas)}]\n"
+        lines.append(f"DETECTOR({i}, 0) rec[{-(i+num_measures_per_type)}] rec[{-(i+3*num_measures_per_type+num_datas)}]")
 
     # now the confusing one: the final data measurements and their adjacent measure measurements
     # create a dict that maps each coord to the record index of the most recent measurement on it
@@ -268,16 +314,17 @@ def final_step(distance, p):
             if data in all_qubits:
                 record_indices.append(coord_to_record_index[data])
         recs = [f"rec[{j}]" for j in record_indices]
-        stim_string += f"DETECTOR({i}, 0) {' '.join(recs)}\n"
+        lines.append(f"DETECTOR({i}, 0) {' '.join(recs)}")
 
     obs_recs = [f"rec[{-(i+2*num_measures_per_type)}]" for i in range(1, distance + 1)]
-    stim_string += f"OBSERVABLE_INCLUDE(0) {' '.join(obs_recs)}"
+    lines.append(f"OBSERVABLE_INCLUDE(0) {' '.join(obs_recs)}")
 
-    return stim_string
+    return "\n".join(lines) + "\n"
 
-def surface_code_circuit_string(distance, rounds, p):
+def surface_code_circuit_string(distance, rounds, p, noise_model: Optional[NoiseModel] = None):
+    noise_model = resolve_noise_model(p, noise_model)
     string = coord_circuit(distance)
-    string += initialization_step(distance, p)
-    string += rounds_step(distance, rounds, p)
-    string += final_step(distance, p)
+    string += initialization_step(distance, p, noise_model=noise_model)
+    string += rounds_step(distance, rounds, p, noise_model=noise_model)
+    string += final_step(distance, p, noise_model=noise_model)
     return string
