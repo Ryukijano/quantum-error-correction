@@ -14,6 +14,8 @@ import numpy as np
 
 from .base import BoolArray, DecoderMetadata, DecoderOutput, DecoderProtocol
 
+_PYMATCHING_CACHE: dict[int, Any] = {}
+
 
 @dataclass
 class MWPMDecoder(DecoderProtocol):
@@ -32,7 +34,15 @@ class MWPMDecoder(DecoderProtocol):
         if metadata.detector_error_model is None:
             raise ValueError("MWPMDecoder requires detector_error_model in metadata for pymatching path.")
 
-        matching = Matching.from_detector_error_model(metadata.detector_error_model)
+        detector_error_model = metadata.detector_error_model
+        cache_key = id(detector_error_model)
+
+        try:
+            matching = _PYMATCHING_CACHE[cache_key]
+        except KeyError:
+            matching = Matching.from_detector_error_model(detector_error_model)
+            _PYMATCHING_CACHE[cache_key] = matching
+
         predictions = matching.decode_batch(detector_events)
         return np.asarray(predictions, dtype=np.bool_)
 
