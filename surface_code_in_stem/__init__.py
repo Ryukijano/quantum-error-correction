@@ -1,5 +1,7 @@
 """Surface code builders and helpers."""
 
+from __future__ import annotations
+
 from .surface_code import surface_code_circuit_string
 from .dynamic_surface_codes import (
     DynamicLayout,
@@ -32,4 +34,3 @@ __all__ = [
     "ErasureAwareNoiseModel",
     "CorrelatedBurstNoiseModel",
 ]
-
