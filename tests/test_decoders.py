@@ -38,6 +38,28 @@ def test_mwpm_decoder_output_is_deterministic_for_fixed_inputs():
     np.testing.assert_array_equal(first, second)
 
 
+def test_mwpm_decoder_fallback_is_used_and_zero_when_pymatching_unavailable(monkeypatch):
+    detector_samples, _, metadata = _sample_detector_data()
+    shots = detector_samples.shape[0]
+    num_observables = metadata.num_observables
+
+    def _raise_import_error(*args, **kwargs):
+        raise ImportError("pymatching unavailable")
+
+    monkeypatch.setattr(MWPMDecoder, "_decode_with_pymatching", _raise_import_error, raising=True)
+
+    decoder = MWPMDecoder()
+    decoder_output = decoder.decode(detector_samples, metadata)
+    logical_predictions = decoder_output.logical_predictions
+
+    assert logical_predictions.shape == (shots, num_observables)
+
+    expected = np.zeros((shots, num_observables), dtype=logical_predictions.dtype)
+    np.testing.assert_array_equal(logical_predictions, expected)
+
+    assert decoder_output.diagnostics["backend"] == "fallback"
+
+
 def test_union_find_and_sparse_blossom_match_mwpm_on_small_circuit():
     detector_samples, _, metadata = _sample_detector_data()
 
