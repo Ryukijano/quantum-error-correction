@@ -8,6 +8,7 @@ without requiring long simulation times.
 
 from __future__ import annotations
 
+from importlib.util import find_spec
 from typing import Callable, Dict, Iterable
 
 import numpy as np
@@ -47,7 +48,7 @@ def _logical_error_rate(
         circuit=circuit,
         seed=seed,
     )
-    if isinstance(active_decoder, MWPMDecoder):
+    if isinstance(active_decoder, MWPMDecoder) and find_spec("pymatching") is not None:
         metadata.detector_error_model = circuit.detector_error_model(decompose_errors=True)
     decoded = active_decoder.decode(detector_samples, metadata=metadata)
 

@@ -1,8 +1,9 @@
 """Union-Find decoder adapter.
 
-This adapter uses the same PyMatching detector-error-model interface where
-available and exposes a separate decoder identity for experiments comparing
-near-linear-time decoders.
+This is currently an experiment-facing placeholder that delegates to the MWPM
+implementation while preserving a distinct decoder identity and diagnostics.
+It exists so comparison code can wire in a future union-find decoder without
+changing the surrounding interface.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from .mwpm import MWPMDecoder
 
 @dataclass
 class UnionFindDecoder(DecoderProtocol):
-    """Union-Find-style adapter with deterministic fallback behavior."""
+    """Placeholder union-find adapter that currently delegates to MWPM."""
 
     name: str = "union_find"
 
