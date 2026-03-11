@@ -23,19 +23,24 @@ This repository contains implementations and simulations of quantum error correc
 - [getting_started.ipynb](cci:7://file:///home/ryukijano/quantum_error_correction/getting_started.ipynb:0:0-0:0): Introduction to Stim notebook
 
 ## Requirements
-- Python 3.7+
+
+- Python 3.10+
+
 ## Installation
+
 ```bash
-pip install stim pymatching numpy matplotlib
+pip install stim numpy matplotlib
 ```
 
-## Reinforcement learning quickstart
+## Quickstart
 
-The `rl_nested_learning.py` utilities rely on the optional [`stim`](https://github.com/quantumlib/Stim) package for circuit
-generation and simulation. Install Stim before running the RL examples:
+### 1) Build a static surface-code circuit
 
-```bash
-pip install stim
+```python
+from surface_code_in_stem.surface_code import surface_code_circuit_string
+
+stim_circuit = surface_code_circuit_string(distance=3, rounds=3, p=0.001)
+print(stim_circuit[:400])
 ```
 
 If Stim is missing, importing `rl_nested_learning` will defer the error until a Stim-powered feature is used, while providing a
