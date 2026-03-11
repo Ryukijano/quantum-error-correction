@@ -24,7 +24,7 @@ This repository contains implementations and simulations of quantum error correc
 
 ## Requirements
 
-- Python 3.7+
+- Python 3.10+
 
 ## Installation
 
