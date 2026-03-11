@@ -29,7 +29,7 @@ This repository contains implementations and simulations of quantum error correc
 ## Installation
 
 ```bash
-pip install stim pymatching numpy matplotlib
+pip install stim numpy matplotlib
 ```
 
 ## Quickstart
