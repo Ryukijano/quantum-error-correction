@@ -9,6 +9,7 @@ from .dynamic_surface_codes import (
     hexagonal_surface_code,
     iswap_surface_code,
     walking_surface_code,
+    xyz2_hexagonal_code,
 )
 from .rl_nested_learning import compare_nested_policies, tabulate_comparison
 from .noise_models import (
@@ -26,6 +27,7 @@ __all__ = [
     "hexagonal_surface_code",
     "iswap_surface_code",
     "walking_surface_code",
+    "xyz2_hexagonal_code",
     "compare_nested_policies",
     "tabulate_comparison",
     "NoiseModel",

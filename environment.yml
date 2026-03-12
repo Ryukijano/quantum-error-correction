@@ -1,0 +1,20 @@
+name: syndrome-net
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.10
+  - numpy
+  - scipy
+  - matplotlib
+  - networkx
+  - pip
+  - pytest
+  - pip:
+    - stim
+    - pymatching
+    - torch
+    - sinter
+    - tqdm
+    - pandas
+    - seaborn

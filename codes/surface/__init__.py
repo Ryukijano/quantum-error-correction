@@ -6,6 +6,7 @@ from .wrappers import (
     iswap_surface_code,
     surface_code_circuit_string,
     walking_surface_code,
+    xyz2_hexagonal_code,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "hexagonal_surface_code",
     "walking_surface_code",
     "iswap_surface_code",
+    "xyz2_hexagonal_code",
 ]

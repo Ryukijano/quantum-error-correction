@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from surface_code_in_stem.dynamic import hexagonal_surface_code, iswap_surface_code, walking_surface_code
+from surface_code_in_stem.dynamic import (
+    hexagonal_surface_code,
+    iswap_surface_code,
+    walking_surface_code,
+    xyz2_hexagonal_code,
+)
 from surface_code_in_stem.surface_code import surface_code_circuit_string
 
 from ..interfaces import (
@@ -28,6 +33,7 @@ class SurfaceCodePlugin(CodeFamilyPlugin):
             "hexagonal": hexagonal_surface_code,
             "walking": walking_surface_code,
             "iswap": iswap_surface_code,
+            "xyz2": xyz2_hexagonal_code,
         }
         try:
             builder = builders[variant]
@@ -35,7 +41,8 @@ class SurfaceCodePlugin(CodeFamilyPlugin):
             valid = ", ".join(sorted(builders))
             raise ValueError(f"Unknown surface variant '{variant}'. Expected one of: {valid}.") from exc
 
-        return builder(config.distance, config.rounds, config.physical_error_rate)
+        circuit = builder(config.distance, config.rounds, config.physical_error_rate)
+        return circuit if isinstance(circuit, str) else str(circuit)
 
     def syndrome_spec(self) -> SyndromeExtractionSpec:
         return SyndromeExtractionSpec(

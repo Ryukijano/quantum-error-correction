@@ -12,6 +12,7 @@ from surface_code_in_stem.dynamic import (
     hexagonal_surface_code,
     iswap_surface_code,
     walking_surface_code,
+    xyz2_hexagonal_code,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "hexagonal_surface_code",
     "iswap_surface_code",
     "walking_surface_code",
+    "xyz2_hexagonal_code",
 ]

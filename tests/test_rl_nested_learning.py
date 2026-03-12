@@ -8,13 +8,14 @@ from surface_code_in_stem.dynamic import (
     hexagonal_surface_code,
     iswap_surface_code,
     walking_surface_code,
+    xyz2_hexagonal_code,
 )
 from surface_code_in_stem.rl_nested_learning import compare_nested_policies, tabulate_comparison
 
 
 @pytest.mark.parametrize(
     "dynamic_builder",
-    [hexagonal_surface_code, iswap_surface_code, walking_surface_code],
+    [hexagonal_surface_code, iswap_surface_code, walking_surface_code, xyz2_hexagonal_code],
 )
 def test_compare_nested_policies_and_tabulation(dynamic_builder):
     expected_keys = {
@@ -78,3 +79,12 @@ def test_compare_nested_policies_is_deterministic_with_fixed_seed():
     # Compare explicitly deterministic outputs only.
     for policy in ("static", "dynamic"):
         assert first[policy]["logical_error_rate"] == second[policy]["logical_error_rate"]
+
+
+def test_xyz2_hexagonal_code_builds_detector_circuit():
+    circuit = xyz2_hexagonal_code(distance=3, rounds=2, p=0.001)
+
+    assert isinstance(circuit, stim.Circuit)
+    assert circuit.num_observables == 1
+    assert circuit.num_detectors > 0
+    circuit.detector_error_model(decompose_errors=True)
