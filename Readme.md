@@ -1,109 +1,163 @@
-# Quantum Error Correction with Stim
+# Syndrome-Net: Quantum Error Correction + RL Control
 
-This repository contains implementations and simulations of quantum error correction codes using Stim, including:
+Syndrome-Net is a research-oriented framework for building, simulating, decoding, and optimizing quantum error-correction (QEC) workflows with Stim. It combines:
 
-- Repetition codes
-- Surface codes
-- Error threshold analysis
+- Surface-code and dynamic-code circuit generation
+- Plugin-based support for multiple code families (`surface`, `qldpc`, `bosonic`, `dual_rail_erasure`)
+- Classical and confidence-aware decoders
+- Reinforcement-learning environments and agents for:
+  - one-shot decoding (`QECGymEnv`)
+  - continuous calibration (`QECContinuousControlEnv`)
 
-## Structure
-- `introduction_to_stim/`: Lab exercises and tutorials for Stim
-- `surface_code_in_stem/`: Surface code implementation and simulations
-- `codes/`: Code-family plugin system with shared interfaces and a benchmark harness
-  to evaluate multiple families through the same decoder API.
-  - `codes/surface/`: Surface-code plugin + compatibility wrappers around existing builders
-  - `codes/qldpc/`: qLDPC placeholder plugin with explicit parity-check schema
-  - `codes/bosonic/`: Bosonic placeholder plugin scaffold
-  - `codes/dual_rail_erasure/`: Dual-rail erasure placeholder plugin with required parity inputs
-- `surface_code_in_stem/dynamic/`: Stim circuit builders for the hexagonal,
-  walking, and iSWAP dynamic surface codes demonstrated in Morvan et al.
-  (Nature Physics, 2025). See `surface_code_in_stem/DYNAMIC_CODES.md` for a
-  mapping from the paper to the implementation choices here. The legacy
-  `dynamic_surface_codes.py` re-exports the same helpers for convenience.
-- [getting_started.ipynb](cci:7://file:///home/ryukijano/quantum_error_correction/getting_started.ipynb:0:0-0:0): Introduction to Stim notebook
+## What’s New
 
-## Requirements
+- Gym-compatible QEC environments in `surface_code_in_stem/rl_control/gym_env.py`
+- SOTA RL agent implementations in `surface_code_in_stem/rl_control/sota_agents.py`
+  - Transformer/TITANS-backed PPO for discrete decoding
+  - Continuous SAC for calibration control
+- End-to-end training script in `scripts/train_sota_rl.py`
+- Expanded code-family support:
+  - Bosonic variants (`gkp_surface`, `cat_code`, `squeezed_state`)
+  - qLDPC parity-matrix builders (toric, surface-derived, hypergraph-product, custom parity)
 
-- Python 3.10+
+## Demo Screenshots
 
-## Installation
+These screenshots were captured from the live Streamlit QEC dashboard and are
+checked into the repo so GitHub renders them directly:
+
+| Circuit Viewer | Threshold Explorer |
+|---|---|
+| ![Circuit Viewer demo](assets/demo/circuit_viewer.png) | ![Threshold Explorer demo](assets/demo/threshold_explorer.png) |
+
+The demo app includes:
+
+- Stim circuit visualization with static SVG and interactive Crumble views
+- Detector error graph + syndrome heatmap
+- Threshold sweeps with Plotly curves
+- Live RL training controls for PPO / SAC runs
+
+## Repository Layout
+
+- `surface_code_in_stem/`: core circuit builders, decoders, RL control, noise models
+- `codes/`: plugin architecture and benchmarking harness across code families
+- `scripts/`: runnable workflows (including SOTA RL training)
+- `tests/`: targeted tests for gym envs, bosonic variants, and qLDPC parity builders
+- `surface_code_in_stem/DYNAMIC_CODES.md`: implementation notes mapped to Morvan et al. 2025
+
+## Install
+
+Python 3.10+ is recommended.
 
 ```bash
-pip install stim numpy matplotlib
+pip install -r requirements.txt
+```
+
+Minimal install for RL/Gym experiments:
+
+```bash
+pip install stim gym numpy torch pytest
 ```
 
 ## Quickstart
 
-### 1) Build a static surface-code circuit
+### 1) Generate a surface-code circuit
 
 ```python
 from surface_code_in_stem.surface_code import surface_code_circuit_string
 
-stim_circuit = surface_code_circuit_string(distance=3, rounds=3, p=0.001)
-print(stim_circuit[:400])
+circuit = surface_code_circuit_string(distance=3, rounds=3, p=0.001)
+print(circuit[:500])
 ```
 
-If Stim is missing, importing `rl_nested_learning` will defer the error until a Stim-powered feature is used, while providing a
-clear installation hint so the module remains importable in lightweight environments.
+### 2) Run the new Gym environments
 
-## Project flow diagram
+```python
+from surface_code_in_stem.rl_control.gym_env import QECGymEnv, QECContinuousControlEnv
+
+decoding_env = QECGymEnv(distance=3, rounds=3, physical_error_rate=0.005)
+obs, info = decoding_env.reset(seed=7)
+
+control_env = QECContinuousControlEnv(distance=3, rounds=3, parameter_dim=4)
+obs_ctrl, _ = control_env.reset(seed=7)
+```
+
+### 3) Train SOTA RL agents
+
+```bash
+# Decoder (Transformer/TITANS + PPO)
+python3 scripts/train_sota_rl.py --mode ppo --episodes 512
+
+# Calibration (Continuous SAC)
+python3 scripts/train_sota_rl.py --mode sac --episodes 512
+
+# Both
+python3 scripts/train_sota_rl.py --mode all --episodes 1000
+```
+
+### 4) Run tests
+
+```bash
+python3 -m pytest tests/test_gym_env.py
+python3 -m pytest tests/test_bosonic.py
+python3 -m pytest tests/test_qldpc_parity.py
+```
+
+## High-Level Architecture
 
 ```mermaid
-flowchart TD
-    %% =========================
-    %% Entry Points
-    %% =========================
-    A[User / Notebook / Script] --> B1[Static circuit workflow]
-    A --> B2[Dynamic circuit workflow]
-    A --> B3[RL comparison workflow]
+flowchart LR
+    U[User / Script / Notebook] --> A[Code Family Plugins]
+    U --> B[RL Gym Environments]
 
-    %% =========================
-    %% Static Surface Code
-    %% =========================
-    subgraph S1[Static Surface Code Path]
-        B1 --> C1[surface_code_in_stem.surface_code.surface_code_circuit_string]
-        C1 --> C2[Geometry helpers<br/>data_coords / x_measure_coords / z_measure_coords]
-        C1 --> C3[Cycle assembly<br/>initialization_step + rounds_step + final_step]
-        C3 --> C4[Stim circuit string]
+    subgraph Plugins
+        A1[surface plugin]
+        A2[qldpc plugin]
+        A3[bosonic plugin]
+        A4[dual_rail_erasure plugin]
     end
 
-    %% =========================
-    %% Dynamic Surface Codes
-    %% =========================
-    subgraph S2[Dynamic Surface Code Path]
-        B2 --> D0[surface_code_in_stem.dynamic.__init__]
-        D0 --> D1[hexagonal_surface_code]
-        D0 --> D2[walking_surface_code]
-        D0 --> D3[iswap_surface_code]
+    A --> A1
+    A --> A2
+    A --> A3
+    A --> A4
 
-        D1 --> DB[dynamic.base<br/>DynamicLayout + StimStringBuilder + stabilizer_cycle]
-        D2 --> DB
-        D3 --> DB
+    A1 --> C[Stim Circuit String]
+    A2 --> C
+    A3 --> C
+    A4 --> C
 
-        DB --> D4[prepare_coords + adjacent_coords<br/>imported from static module]
-        DB --> D5[Stim circuit string with<br/>QUBIT_COORDS / DETECTOR / OBSERVABLE_INCLUDE]
+    C --> D[stim.Circuit + sampler]
+    D --> E[Syndromes + Observables]
+
+    subgraph RL
+        B1[QECGymEnv<br/>one-shot decoding]
+        B2[QECContinuousControlEnv<br/>calibration control]
+        F1[Transformer/TITANS PPO]
+        F2[Continuous SAC]
     end
 
-    %% =========================
-    %% RL / Comparison
-    %% =========================
-    subgraph S3[Policy Comparison / Evaluation]
-        B3 --> E1[surface_code_in_stem.rl_nested_learning.compare_nested_policies]
-        E1 --> E2[Build static circuit<br/>surface_code_circuit_string]
-        E1 --> E3[Build dynamic circuit<br/>default: hexagonal_surface_code]
-        E2 --> E4[_logical_error_rate]
-        E3 --> E4
-        E4 --> E5[stim.Circuit + detector sampler]
-        E5 --> E6[logical_error_rate metrics]
-        E6 --> E7[tabulate_comparison]
-    end
+    B --> B1
+    B --> B2
+    E --> B1
+    E --> B2
+    B1 --> F1
+    B2 --> F2
 
-    %% =========================
-    %% Top-level compatibility modules
-    %% =========================
-    F1[rl_nested_learning.py at repo root] --> F2[Lazy optional stim import helper]
-    F3[surface_code_in_stem/dynamic_surface_codes.py] --> D0
-    F4[surface_code_in_stem/__init__.py] --> C1
-    F4 --> D0
-    F4 --> E1
+    F1 --> G[Decode action / logical prediction]
+    F2 --> H[Continuous control action / theta update]
+
+    G --> I[Reward / metrics]
+    H --> I
 ```
+
+## Documentation
+
+- `docs/README.md`: docs index and reading path
+- `docs/RL_QEC_ARCHITECTURE.md`: detailed architecture and algorithm internals with Mermaid diagrams
+- `RL_EXPERIMENTS.md`: reproducibility notes
+- `surface_code_in_stem/DYNAMIC_CODES.md`: dynamic-code implementation notes
+
+## Notes
+
+- Current RL environments are implemented with `gym`; if desired, migration to `gymnasium` is straightforward.
+- `QECGymEnv` is currently a one-step episode formulation for decoding, which is ideal for policy learning over syndrome-to-logical mapping and baseline comparison against MWPM.

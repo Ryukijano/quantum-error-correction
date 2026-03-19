@@ -71,9 +71,25 @@ class BiasedNoiseModel(NoiseModel):
     Useful for cat-qubit-like asymmetry where bit- and phase-flip rates differ.
     """
 
-    gate_p: float
-    bit_flip_p: float
-    phase_flip_p: float
+    gate_p: float = 0.0
+    bit_flip_p: float = 0.0
+    phase_flip_p: float = 0.0
+    
+    # Optional parameters for the new interface
+    p_x: float = 0.0
+    p_y: float = 0.0
+    p_z: float = 0.0
+    biased_pauli: str = "Z"
+    bias_ratio: float = 10.0
+
+    def __post_init__(self):
+        # Support both old and new initialization signatures
+        if self.p_x > 0 or self.p_z > 0:
+            self.bit_flip_p = self.p_x
+            self.phase_flip_p = self.p_z
+            # Use average for gate_p if not explicitly provided
+            if self.gate_p == 0.0:
+                self.gate_p = self.p_x + self.p_y + self.p_z
 
     def gate_noise(self, *, gate: str, pair_targets: Sequence[int], idle_targets: Sequence[int], layer_id: str) -> List[str]:
         lines: List[str] = []

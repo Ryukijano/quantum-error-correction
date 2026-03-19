@@ -7,7 +7,7 @@ which translate to Pauli errors.
 """
 
 import stim
-from surface_code_in_stem.surface_code import surface_code_circuit
+from surface_code_in_stem.surface_code import surface_code_circuit_string
 
 def gkp_surface_code(
     distance: int,
@@ -31,7 +31,8 @@ def gkp_surface_code(
     # or biased noise models derived from 'sigma'.
     
     # We can add a comment or metadata to the circuit
-    circuit = surface_code_circuit(distance, rounds, p)
+    circuit_str = surface_code_circuit_string(distance, rounds, p)
+    circuit = stim.Circuit(circuit_str)
     
     # Prepend some comments about GKP parameters
     header = stim.Circuit()

@@ -48,14 +48,15 @@ def _logical_error_rate(
     detector_samples, observable_samples = sampler.sample(shots, separate_observables=True)
 
     active_decoder = decoder or MWPMDecoder()
+    dem = None
+    if isinstance(active_decoder, MWPMDecoder) and find_spec("pymatching") is not None:
+        dem = circuit.detector_error_model(decompose_errors=True)
     metadata = DecoderMetadata(
         num_observables=circuit.num_observables,
-        detector_error_model=None,
+        detector_error_model=dem,
         circuit=circuit,
         seed=seed,
     )
-    if isinstance(active_decoder, MWPMDecoder) and find_spec("pymatching") is not None:
-        metadata.detector_error_model = circuit.detector_error_model(decompose_errors=True)
     decoded = active_decoder.decode(detector_samples, metadata=metadata)
 
     # Post-decoding logical error is the residual mismatch between decoder
