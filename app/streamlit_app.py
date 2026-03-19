@@ -25,6 +25,11 @@ _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from app.live_viz import (
+    animated_error_propagation_frame,
+    create_surface_code_lattice,
+    generate_live_rl_visualization,
+)
 from app.qec_viz import (
     PALETTE,
     PLOTLY_LAYOUT,
@@ -143,6 +148,56 @@ html, body, [data-testid="stAppViewContainer"] {
     border-radius: 50%;
     background: #4aff9e;
     animation: glow 1.2s ease-in-out infinite;
+    margin-right: 6px;
+}
+/* ── Live Environment Window ── */
+.live-env-container {
+    background: linear-gradient(135deg, #0a0c18 0%, #151929 100%);
+    border: 2px solid #2a3060;
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 0 20px rgba(74, 158, 255, 0.1);
+}
+.live-env-title {
+    color: #ff6b6b;
+    font-weight: 700;
+    font-size: 1.1rem;
+    text-shadow: 0 0 10px rgba(255, 107, 107, 0.5);
+}
+/* ── Error pulse animation ── */
+@keyframes error-pulse {
+    0%, 100% { box-shadow: 0 0 5px rgba(255, 68, 68, 0.5); }
+    50% { box-shadow: 0 0 20px rgba(255, 68, 68, 1); }
+}
+/* ── Syndrome fire animation ── */
+@keyframes syndrome-fire {
+    0%, 100% { box-shadow: 0 0 5px rgba(255, 102, 0, 0.5); }
+    50% { box-shadow: 0 0 25px rgba(255, 102, 0, 1); }
+}
+/* ── Correction glow ── */
+@keyframes correction-glow {
+    0%, 100% { box-shadow: 0 0 5px rgba(68, 255, 68, 0.5); }
+    50% { box-shadow: 0 0 15px rgba(68, 255, 68, 0.9); }
+}
+/* ── Legend styling ── */
+.viz-legend {
+    background: #151929;
+    border: 1px solid #2a3060;
+    border-radius: 8px;
+    padding: 12px;
+    margin-top: 8px;
+}
+.viz-legend-item {
+    display: inline-flex;
+    align-items: center;
+    margin-right: 16px;
+    font-size: 0.85rem;
+    color: #a8d8ff;
+}
+.viz-legend-symbol {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
     margin-right: 6px;
 }
 </style>
@@ -328,6 +383,8 @@ with tab_rl:
             st.session_state.training_done = False
             st.session_state.training_error = None
             st.session_state.training_episode = 0
+            st.session_state.latest_error_locations = None
+            st.session_state.error_history = []
             new_runner = RLRunner(
                 mode=rl_mode,
                 distance=distance,
@@ -360,6 +417,82 @@ with tab_rl:
     col_heatmap, col_ler = st.columns(2)
     chart_heatmap   = col_heatmap.empty()
     chart_ler       = col_ler.empty()
+
+    # ------------------------------------------------------------------
+    # Live Environment Visualization — Real-time error propagation
+    # ------------------------------------------------------------------
+    st.divider()
+    st.markdown(
+        '<div class="live-env-container">'
+        '<span class="live-env-title">🔴 Live Environment — Error Propagation</span>'
+        '</div>',
+        unsafe_allow_html=True
+    )
+    st.caption("Watch errors appear (🔴 X-error, 🔵 Z-error, 🟣 Y-error), syndrome measurements fire (⭐), and decoder corrections apply (🟢) in real-time.")
+    
+    # Legend
+    st.markdown(
+        """
+        <div class="viz-legend">
+            <span class="viz-legend-item"><span class="viz-legend-symbol" style="background:#ff4444"></span> X Error</span>
+            <span class="viz-legend-item"><span class="viz-legend-symbol" style="background:#4444ff"></span> Z Error</span>
+            <span class="viz-legend-item"><span class="viz-legend-symbol" style="background:#ff00ff"></span> Y Error (X+Z)</span>
+            <span class="viz-legend-item"><span class="viz-legend-symbol" style="background:#ff6600"></span> X-Syndrome Fired</span>
+            <span class="viz-legend-item"><span class="viz-legend-symbol" style="background:#00aaff"></span> Z-Syndrome Fired</span>
+            <span class="viz-legend-item"><span class="viz-legend-symbol" style="background:#44ff44"></span> Decoder Correction</span>
+            <span class="viz-legend-item"><span class="viz-legend-symbol" style="background:#666666"></span> Clean Qubit</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    live_env_col, live_stats_col = st.columns([2, 1])
+    
+    with live_env_col:
+        live_lattice = st.empty()
+    
+    with live_stats_col:
+        live_stats = st.empty()
+        
+    # Generate live visualization
+    syn = st.session_state.latest_syndrome
+    action = st.session_state.latest_action
+    reward = history[-1].get('reward', 0.0) if history else 0.0
+    correct = st.session_state.latest_correct
+    ep = st.session_state.training_episode
+    
+    if syn is not None:
+        try:
+            # Create animated lattice visualization
+            lattice = create_surface_code_lattice(distance)
+            n_x_anc = len(lattice['x_ancilla'])
+            n_z_anc = len(lattice['z_ancilla'])
+            
+            # Parse syndrome
+            x_syndrome = syn[:n_x_anc] if len(syn) >= n_x_anc else None
+            z_syndrome = syn[n_x_anc:n_x_anc+n_z_anc] if len(syn) >= n_x_anc + n_z_anc else None
+            
+            # Create frame with animation
+            live_fig = animated_error_propagation_frame(
+                lattice=lattice,
+                x_syndrome=x_syndrome,
+                z_syndrome=z_syndrome,
+                corrections=action.astype(bool) if action is not None else None,
+                frame_num=ep % 10,
+                total_frames=10,
+                title=f"Episode {ep} — Reward: {reward:.3f} | {'✅ Correct' if correct else '❌ Logical Error'}"
+            )
+            live_lattice.plotly_chart(live_fig, use_container_width=True)
+            
+            # Update stats
+            live_stats.metric("Active Syndromes", f"{int(np.sum(syn))}/{len(syn)}")
+            live_stats.metric("Code Distance", f"d={distance}")
+            live_stats.metric("Data Qubits", f"{len(lattice['data'])}")
+            
+        except Exception as e:
+            live_lattice.warning(f"Visualization error: {e}")
+    else:
+        live_lattice.info("▶️ Start training to see live error propagation visualization")
 
     # ------------------------------------------------------------------
     # Poll loop — runs on each Streamlit rerun cycle

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Launch the Streamlit QEC visualizer inside the syndrome-net (or jax) conda env.
+# Launch the Streamlit QEC visualizer inside the jax conda env.
 # Usage:
-#   ./run_app.sh              # uses 'syndrome-net' env
+#   ./run_app.sh              # uses 'jax' env
 #   ENV=jax ./run_app.sh      # uses 'jax' env
 
 set -euo pipefail
