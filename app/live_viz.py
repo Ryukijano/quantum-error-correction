@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import numpy as np
 import plotly.graph_objects as go
-from typing import Optional
+from typing import Optional, Dict, Any
+from functools import lru_cache
 
 
+@lru_cache(maxsize=32)
 def create_surface_code_lattice(distance: int) -> dict:
-    """Create the surface code lattice structure.
+    """Create the surface code lattice structure (cached for performance).
     
     Returns coordinates for data qubits (at vertices) and 
     ancilla qubits (at plaquette centers).

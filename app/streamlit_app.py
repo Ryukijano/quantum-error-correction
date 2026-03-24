@@ -26,7 +26,6 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from app.live_viz import (
-    animated_error_propagation_frame,
     create_surface_code_lattice,
     generate_live_rl_visualization,
 )
@@ -200,6 +199,24 @@ html, body, [data-testid="stAppViewContainer"] {
     border-radius: 50%;
     margin-right: 6px;
 }
+
+/* ── Enhanced professional polish for snappy UX ── */
+.stPlotlyChart {
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    transition: transform 0.2s ease;
+}
+.stPlotlyChart:hover {
+    transform: translateY(-2px);
+}
+.export-btn {
+    background: linear-gradient(135deg, #1a2a6c 0%, #4a1a8c 100%) !important;
+    color: white !important;
+    border-radius: 6px !important;
+}
+.error-state {
+    animation: error-pulse 1s ease-in-out infinite;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -249,6 +266,7 @@ def _init_state() -> None:
         training_done=False,
         training_error=None,
         training_episode=0,
+        error_locations=None,  # for interactive error injection
     )
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -446,53 +464,84 @@ with tab_rl:
         unsafe_allow_html=True
     )
     
-    live_env_col, live_stats_col = st.columns([2, 1])
+    rl_left, rl_right = st.columns([3, 2])
     
-    with live_env_col:
+    with rl_left:
+        st.markdown("**Live Lattice**")
         live_lattice = st.empty()
+        if st.button("🔴 Inject Random X Error", key="inject_error", use_container_width=True):
+            if 'error_locations' not in st.session_state or not isinstance(st.session_state.error_locations, dict):
+                st.session_state.error_locations = {'x': [], 'z': []}
+            import random
+            d = distance
+            n_data = len(create_surface_code_lattice(d)['data'])
+            idx = random.randint(0, n_data - 1)
+            if len(st.session_state.error_locations.get('x', [])) == 0:
+                st.session_state.error_locations['x'] = [False] * n_data
+                st.session_state.error_locations['z'] = [False] * n_data
+            st.session_state.error_locations['x'][idx] = not st.session_state.error_locations['x'][idx]
+            st.rerun()
     
-    with live_stats_col:
-        live_stats = st.empty()
+    with rl_right:
+        st.markdown("**Circuit Viewer (during training)**")
+        circuit = _get_circuit(distance, rounds, p_phys)
+        if circuit is None:
+            st.error("Could not build circuit")
+        else:
+            view_mode = st.radio(
+                "View",
+                ["Static SVG", "Interactive (Crumble)"],
+                horizontal=True,
+                key="rl_circuit_view"
+            )
+            if view_mode == "Static SVG":
+                svg_str = circuit_svg(circuit, diagram_type)
+                st.markdown(f'<div class="circuit-panel">{svg_str}</div>', unsafe_allow_html=True)
+            else:
+                html_str = circuit_interactive_html(circuit)
+                st.components.v1.html(html_str, height=480, scrolling=True)
+            
+            st.caption("Detector graph and heatmap below")
+            try:
+                sampler = circuit.compile_detector_sampler(seed=42)
+                det, _ = sampler.sample(1, separate_observables=True)
+                syn = det[0].astype(np.int8)
+                dem_fig = detector_graph(circuit, syndrome=syn, title="DEM — sample")
+                st.plotly_chart(dem_fig, use_container_width=True)
+                hm_fig = syndrome_heatmap(syn, distance=distance, title="Syndrome Heatmap")
+                st.plotly_chart(hm_fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Circuit viz error: {e}")
         
-    # Generate live visualization
+    # Generate live visualization (left column only)
+    history = st.session_state.history
     syn = st.session_state.latest_syndrome
     action = st.session_state.latest_action
     reward = history[-1].get('reward', 0.0) if history else 0.0
     correct = st.session_state.latest_correct
     ep = st.session_state.training_episode
     
-    if syn is not None:
-        try:
-            # Create animated lattice visualization
-            lattice = create_surface_code_lattice(distance)
-            n_x_anc = len(lattice['x_ancilla'])
-            n_z_anc = len(lattice['z_ancilla'])
-            
-            # Parse syndrome
-            x_syndrome = syn[:n_x_anc] if len(syn) >= n_x_anc else None
-            z_syndrome = syn[n_x_anc:n_x_anc+n_z_anc] if len(syn) >= n_x_anc + n_z_anc else None
-            
-            # Create frame with animation
-            live_fig = animated_error_propagation_frame(
-                lattice=lattice,
-                x_syndrome=x_syndrome,
-                z_syndrome=z_syndrome,
-                corrections=action.astype(bool) if action is not None else None,
-                frame_num=ep % 10,
-                total_frames=10,
-                title=f"Episode {ep} — Reward: {reward:.3f} | {'✅ Correct' if correct else '❌ Logical Error'}"
-            )
-            live_lattice.plotly_chart(live_fig, use_container_width=True)
-            
-            # Update stats
-            live_stats.metric("Active Syndromes", f"{int(np.sum(syn))}/{len(syn)}")
-            live_stats.metric("Code Distance", f"d={distance}")
-            live_stats.metric("Data Qubits", f"{len(lattice['data'])}")
-            
-        except Exception as e:
-            live_lattice.warning(f"Visualization error: {e}")
-    else:
-        live_lattice.info("▶️ Start training to see live error propagation visualization")
+    with rl_left:
+        if syn is not None:
+            try:
+                viz_result = generate_live_rl_visualization(
+                    distance=distance,
+                    syndrome=syn,
+                    action=action,
+                    correct=correct,
+                    episode=ep,
+                    reward=reward,
+                    error_locations=st.session_state.get('error_locations'),
+                )
+                live_lattice.plotly_chart(viz_result['lattice'], use_container_width=True, key=f"live_lattice_{ep}")
+                
+                stats = viz_result.get('stats', {})
+                st.metric("Active Syndromes", f"{int(stats.get('syndrome_weight', 0))}/{stats.get('n_x_ancilla', 0) + stats.get('n_z_ancilla', 0)}")
+                st.metric("Code Distance", f"d={distance}")
+            except Exception as e:
+                st.error(f"Live viz error: {e}")
+        else:
+            st.info("Start training to see live lattice")
 
     # ------------------------------------------------------------------
     # Poll loop — runs on each Streamlit rerun cycle
