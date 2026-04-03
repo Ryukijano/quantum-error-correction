@@ -283,18 +283,19 @@ def _get_circuit(distance: int, rounds: int, p: float):
         import stim
         from surface_code_in_stem.surface_code import surface_code_circuit_string
         return stim.Circuit(surface_code_circuit_string(distance=distance, rounds=rounds, p=p))
-    except Exception as exc:
-        return None, str(exc)
+    except Exception:
+        return None
 
 
 # ------------------------------------------------------------------
 # Tabs
 # ------------------------------------------------------------------
-tab_circuit, tab_rl, tab_threshold, tab_footprint = st.tabs([
+tab_circuit, tab_rl, tab_threshold, tab_footprint, tab_research = st.tabs([
     "🔬 Circuit Viewer",
     "⚡ RL Live Training",
     "📈 Threshold Explorer",
     "🛰 Teraquop Footprint",
+    "📡 Research Tracker",
 ])
 
 
@@ -512,35 +513,9 @@ with tab_rl:
             except Exception as e:
                 st.warning(f"Circuit viz error: {e}")
         
-    # Generate live visualization (left column only)
-    history = st.session_state.history
-    syn = st.session_state.latest_syndrome
-    action = st.session_state.latest_action
-    reward = history[-1].get('reward', 0.0) if history else 0.0
-    correct = st.session_state.latest_correct
-    ep = st.session_state.training_episode
-    
     with rl_left:
-        if syn is not None:
-            try:
-                viz_result = generate_live_rl_visualization(
-                    distance=distance,
-                    syndrome=syn,
-                    action=action,
-                    correct=correct,
-                    episode=ep,
-                    reward=reward,
-                    error_locations=st.session_state.get('error_locations'),
-                )
-                live_lattice.plotly_chart(viz_result['lattice'], use_container_width=True, key=f"live_lattice_{ep}")
-                
-                stats = viz_result.get('stats', {})
-                st.metric("Active Syndromes", f"{int(stats.get('syndrome_weight', 0))}/{stats.get('n_x_ancilla', 0) + stats.get('n_z_ancilla', 0)}")
-                st.metric("Code Distance", f"d={distance}")
-            except Exception as e:
-                st.error(f"Live viz error: {e}")
-        else:
-            st.info("Start training to see live lattice")
+        if st.session_state.latest_syndrome is None:
+            live_lattice.info("▶ Start training to see live lattice")
 
     # ------------------------------------------------------------------
     # Live fragment — auto-refreshes every 150 ms while training is live
@@ -862,3 +837,153 @@ with tab_footprint:
                 "Physical error rate is above threshold for all selected families — "
                 "error correction is not possible in this regime."
             )
+
+
+# ==================================================================
+# TAB 5 — Research Tracker
+# ==================================================================
+with tab_research:
+    st.markdown("## 📡 QEC Research Tracker")
+    st.markdown(
+        "Track quantum error correction papers and their implementation status. "
+        "Search arXiv for new techniques or manage the local paper database."
+    )
+
+    res_col1, res_col2 = st.columns([1, 2])
+
+    with res_col1:
+        st.markdown("### Paper database")
+        search_query = st.text_input("Search arXiv", placeholder="e.g. Floquet code surface")
+        fetch_btn = st.button("🔍 Search arXiv", use_container_width=True)
+        st.divider()
+        st.markdown("#### Implemented techniques")
+        implemented = {
+            "surface_code":    {"status": "✅ Complete", "file": "surface_code_in_stem/surface_code.py"},
+            "hexagonal_code":  {"status": "✅ Complete", "file": "surface_code_in_stem/dynamic/hexagonal.py"},
+            "walking_code":    {"status": "✅ Complete", "file": "surface_code_in_stem/dynamic/walking.py"},
+            "iswap_code":      {"status": "✅ Complete", "file": "surface_code_in_stem/dynamic/iswap.py"},
+            "xyz2_code":       {"status": "✅ Complete", "file": "surface_code_in_stem/dynamic/xyz2.py"},
+            "mwpm_decoder":    {"status": "✅ Complete", "file": "syndrome_net/decoders.py"},
+            "floquet_code":    {"status": "🔧 In Progress", "file": "surface_code_in_stem/dynamic/floquet.py"},
+            "ldpc_codes":      {"status": "📋 Planned", "file": "syndrome_net/codes.py"},
+            "neural_decoder":  {"status": "📋 Planned", "file": "syndrome_net/decoders.py"},
+        }
+        for tech, info in implemented.items():
+            st.markdown(
+                f"**{tech}** — {info['status']}  \n"
+                f"<small>`{info['file']}`</small>",
+                unsafe_allow_html=True
+            )
+
+    with res_col2:
+        st.markdown("### Key papers")
+        papers = [
+            {
+                "title": "Stim: a fast stabilizer circuit simulator",
+                "authors": "Craig Gidney",
+                "year": 2021,
+                "arxiv": "2103.02202",
+                "relevance": "⭐⭐⭐⭐⭐ Core tool",
+                "status": "✅ Used",
+            },
+            {
+                "title": "Dynamically Generated Logical Qubits (Floquet codes)",
+                "authors": "Hastings, Haah",
+                "year": 2021,
+                "arxiv": "2107.02194",
+                "relevance": "⭐⭐⭐⭐⭐ High impact",
+                "status": "🔧 In Progress",
+            },
+            {
+                "title": "Morvan et al. — Dynamic Surface Codes",
+                "authors": "Morvan et al.",
+                "year": 2025,
+                "arxiv": "2412.14256",
+                "relevance": "⭐⭐⭐⭐ Direct inspiration",
+                "status": "✅ Implemented (hex/walking/iswap)",
+            },
+            {
+                "title": "Tailoring Floquet codes for biased noise (X3Z3)",
+                "authors": "Davydova et al.",
+                "year": 2024,
+                "arxiv": "2211.14796",
+                "relevance": "⭐⭐⭐⭐ High interest",
+                "status": "📋 Planned",
+            },
+            {
+                "title": "Fault-tolerant hyperbolic Floquet codes",
+                "authors": "Fahimniya et al.",
+                "year": 2025,
+                "arxiv": "2309.10033",
+                "relevance": "⭐⭐⭐⭐ 5x qubit efficiency",
+                "status": "📋 Planned",
+            },
+            {
+                "title": "Distributed QEC based on hyperbolic Floquet codes",
+                "authors": "Sutcliffe et al.",
+                "year": 2025,
+                "arxiv": "2501.14029",
+                "relevance": "⭐⭐⭐ Distributed QEC",
+                "status": "📋 Planned",
+            },
+            {
+                "title": "PyMatching: A fast implementation of the Blossom algorithm",
+                "authors": "Higgott",
+                "year": 2022,
+                "arxiv": "2105.13082",
+                "relevance": "⭐⭐⭐⭐⭐ Core decoder",
+                "status": "✅ Used",
+            },
+        ]
+
+        if fetch_btn and search_query:
+            st.info(f"Searching arXiv for: **{search_query}** …")
+            try:
+                import feedparser, re, urllib.parse
+                q = urllib.parse.quote(search_query)
+                url = f"https://export.arxiv.org/api/query?search_query=cat:quant-ph+AND+{q}&max_results=5&sortBy=submittedDate&sortOrder=descending"
+                feed = feedparser.parse(url)
+                if feed.entries:
+                    st.success(f"Found {len(feed.entries)} recent papers:")
+                    for entry in feed.entries[:5]:
+                        arxiv_id = re.search(r"(\d+\.\d+)", entry.id)
+                        arxiv_id = arxiv_id.group(1) if arxiv_id else "?"
+                        st.markdown(
+                            f"**{entry.title}**  \n"
+                            f"{', '.join(a.get('name','') for a in entry.get('authors',[])[:3])}  \n"
+                            f"[arXiv:{arxiv_id}](https://arxiv.org/abs/{arxiv_id})",
+                            unsafe_allow_html=False
+                        )
+                else:
+                    st.info("No results found.")
+            except Exception as exc:
+                st.warning(f"arXiv search requires `feedparser`: {exc}")
+
+        st.markdown("#### Tracked papers")
+        for paper in papers:
+            with st.expander(f"{paper['status']} [{paper['year']}] {paper['title'][:60]}…"):
+                st.markdown(
+                    f"**Authors:** {paper['authors']}  \n"
+                    f"**Year:** {paper['year']}  \n"
+                    f"**arXiv:** [{paper['arxiv']}](https://arxiv.org/abs/{paper['arxiv']})  \n"
+                    f"**Relevance:** {paper['relevance']}  \n"
+                    f"**Status:** {paper['status']}"
+                )
+
+        st.divider()
+        st.markdown("#### Architecture status")
+        arch_items = {
+            "syndrome_net protocols (CircuitBuilder, Decoder, NoiseModel, Visualizer)": "✅",
+            "Plugin registry system (Registry[T])": "✅",
+            "Dependency injection container (DIContainer)": "✅",
+            "Parallel threshold sweep (ThreadPoolExecutor)": "✅",
+            "PyMatching MWPM decoder integration": "✅",
+            "RL live fragment (@st.fragment run_every=0.15)": "✅",
+            "GitHub Actions CI (ruff + circuit-determinism job)": "✅",
+            "Floquet honeycomb code builder": "🔧",
+            "LDPC code builder (pyldpc)": "📋",
+            "Neural decoder (PyTorch/JAX)": "📋",
+            "Async RL training (JAX vmap)": "📋",
+        }
+        for item, status in arch_items.items():
+            st.markdown(f"{status} {item}")
