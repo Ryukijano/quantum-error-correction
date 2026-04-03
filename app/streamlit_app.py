@@ -641,34 +641,26 @@ with tab_threshold:
         try:
             import stim  # noqa: F401
             from concurrent.futures import ThreadPoolExecutor, as_completed
-            from surface_code_in_stem.surface_code import surface_code_circuit_string
-            from surface_code_in_stem.dynamic import (
-                hexagonal_surface_code,
-                walking_surface_code,
-                iswap_surface_code,
-                xyz2_hexagonal_code,
-            )
-            from surface_code_in_stem.decoders import MWPMDecoder, UnionFindDecoder
             from surface_code_in_stem.rl_nested_learning import _logical_error_rate
+            from surface_code_in_stem.decoders import MWPMDecoder, UnionFindDecoder
+            from syndrome_net import CircuitSpec
+            from syndrome_net.container import get_container, reset_container
 
-            builders = {
-                "surface":   surface_code_circuit_string,
-                "hexagonal": hexagonal_surface_code,
-                "walking":   walking_surface_code,
-                "iswap":     iswap_surface_code,
-                "xyz2":      xyz2_hexagonal_code,
-            }
+            # Use syndrome_net plugin registry for circuit builders
+            reset_container()
+            container = get_container()
+            sn_builder = container.circuit_builders.get(th_builder)
             decoder_map = {"mwpm": MWPMDecoder(), "union_find": UnionFindDecoder()}
-            builder_fn = builders.get(th_builder, surface_code_circuit_string)
-            decoder    = decoder_map[th_decoder]
+            decoder = decoder_map[th_decoder]
 
             p_values = np.linspace(0.003, 0.018, 7) if th_quick else np.linspace(0.001, 0.020, 13)
             shots    = 256 if th_quick else 2048
             n_workers = min(8, len(th_distances) * len(p_values))
 
             def _run_one(d: int, p_val: float) -> tuple[int, float, float]:
-                circ_artifact = builder_fn(distance=d, rounds=d, p=float(p_val))
-                circ_str = circ_artifact if isinstance(circ_artifact, str) else str(circ_artifact)
+                spec = CircuitSpec(distance=d, rounds=d, error_probability=float(p_val))
+                circuit = sn_builder.build(spec)
+                circ_str = str(circuit)
                 ler = _logical_error_rate(circ_str, shots=shots, seed=7, decoder=decoder)
                 return d, float(p_val), float(ler)
 
