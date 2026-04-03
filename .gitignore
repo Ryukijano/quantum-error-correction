@@ -38,3 +38,10 @@ venv.bak/
 *.swp
 *.swo
 *~
+
+# QuantumForge artifacts
+quantumforge/.git/
+quantumforge/docs/assets/
+quantumforge/python/benchmarks/__pycache__/
+quantumforge/python/tests/__pycache__/
+quantumforge/target/

@@ -11,7 +11,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Activate via conda run so this script works without sourcing conda init
 exec conda run -n "${ENV_NAME}" --no-capture-output \
-    streamlit run "${REPO_DIR}/app/streamlit_app.py" \
+    python3 -m streamlit run "${REPO_DIR}/app/streamlit_app.py" \
     --server.headless true \
     --server.port "${PORT:-8501}" \
     "$@"
