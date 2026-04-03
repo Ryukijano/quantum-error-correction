@@ -35,7 +35,7 @@ def hexagonal_surface_code(distance: int, rounds: int, p: float, noise_model: Op
             orientations=orient,
             gate="CX",
             noise_model=noise_model,
-            reset_data=False,
+            reset_data=cycle == 0,
             measure_data=False,
             prev_meas=prev_meas,
         )

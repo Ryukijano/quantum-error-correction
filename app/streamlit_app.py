@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import queue
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -544,77 +543,101 @@ with tab_rl:
             st.info("Start training to see live lattice")
 
     # ------------------------------------------------------------------
-    # Poll loop — runs on each Streamlit rerun cycle
+    # Live fragment — auto-refreshes every 150 ms while training is live
     # ------------------------------------------------------------------
-    runner = st.session_state.runner
+    @st.fragment(run_every=0.15)
+    def _live_rl_fragment(
+        _status_box, _kpi_episode, _kpi_reward, _kpi_success, _kpi_mwpm,
+        _chart_metrics, _chart_heatmap, _chart_ler, _live_lattice, _distance,
+    ):
+        """Drains training events and re-renders live metrics without full page reload."""
+        _runner = st.session_state.runner
 
-    if runner and runner.is_running():
-        status_box.markdown(
-            '<span class="live-indicator"></span> <span class="badge-running">TRAINING LIVE</span>',
-            unsafe_allow_html=True,
-        )
+        # Drain queued events
+        if _runner and _runner.is_running():
+            events = _runner.drain()
+            for ev in events:
+                if isinstance(ev, MetricEvent):
+                    st.session_state.history.append(ev.data)
+                    st.session_state.training_episode = int(ev.data.get("episode", 0))
+                elif isinstance(ev, SyndromeEvent):
+                    st.session_state.latest_syndrome = ev.syndrome
+                    st.session_state.latest_action   = ev.action
+                    st.session_state.latest_correct  = ev.correct
+                elif isinstance(ev, DoneEvent):
+                    st.session_state.training_done = True
+                elif isinstance(ev, ErrorEvent):
+                    st.session_state.training_error = ev.message
 
-        # Drain all queued events this cycle
-        events = runner.drain()
-        for ev in events:
-            if isinstance(ev, MetricEvent):
-                st.session_state.history.append(ev.data)
-                st.session_state.training_episode = int(ev.data.get("episode", 0))
-            elif isinstance(ev, SyndromeEvent):
-                st.session_state.latest_syndrome = ev.syndrome
-                st.session_state.latest_action   = ev.action
-                st.session_state.latest_correct  = ev.correct
-            elif isinstance(ev, DoneEvent):
-                st.session_state.training_done = True
-            elif isinstance(ev, ErrorEvent):
-                st.session_state.training_error = ev.message
+        # Status badge
+        if _runner and _runner.is_running():
+            _status_box.markdown(
+                '<span class="live-indicator"></span> <span class="badge-running">TRAINING LIVE</span>',
+                unsafe_allow_html=True,
+            )
+        elif st.session_state.training_done:
+            _status_box.markdown('<span class="badge-done">✅ Training complete</span>', unsafe_allow_html=True)
+        elif st.session_state.training_error:
+            _status_box.markdown(
+                f'<span class="badge-error">❌ Error: {st.session_state.training_error}</span>',
+                unsafe_allow_html=True,
+            )
+        else:
+            _status_box.markdown("*Press ▶ Start Training to begin.*")
 
-        # Schedule rerun to keep polling
-        time.sleep(0.05)
-        st.rerun()
+        # KPIs + charts
+        history = st.session_state.history
+        ep = st.session_state.training_episode or len(history)
 
-    elif st.session_state.training_done:
-        status_box.markdown(
-            '<span class="badge-done">✅ Training complete</span>', unsafe_allow_html=True
-        )
-    elif st.session_state.training_error:
-        status_box.markdown(
-            f'<span class="badge-error">❌ Error: {st.session_state.training_error}</span>',
-            unsafe_allow_html=True,
-        )
-    else:
-        status_box.markdown("*Press ▶ Start Training to begin.*")
+        _kpi_episode.metric("Episode", f"{ep:,}")
+        if history:
+            latest = history[-1]
+            _kpi_reward.metric("Last reward", f"{latest.get('reward', 0):.3f}")
+            _kpi_success.metric("RL success", f"{latest.get('rl_success', 0):.1%}")
+            _kpi_mwpm.metric("MWPM success", f"{latest.get('mwpm_success', 0):.1%}")
 
-    # ------------------------------------------------------------------
-    # Render charts from session history
-    # ------------------------------------------------------------------
-    history = st.session_state.history
-    ep = st.session_state.training_episode or (len(history))
+            _chart_metrics.plotly_chart(rl_metrics_panel(history, window=20), width="stretch")
 
-    kpi_episode.metric("Episode", f"{ep:,}")
-    if history:
-        latest = history[-1]
-        kpi_reward.metric("Last reward", f"{latest.get('reward', 0):.3f}")
-        kpi_success.metric("RL success", f"{latest.get('rl_success', 0):.1%}")
-        kpi_mwpm.metric("MWPM success", f"{latest.get('mwpm_success', 0):.1%}")
+            ler_vals = [h.get("logical_error_rate", 0.0) for h in history]
+            if any(v > 0 for v in ler_vals):
+                _chart_ler.plotly_chart(logical_error_rate_panel(history, window=10), width="stretch")
 
-        chart_metrics.plotly_chart(rl_metrics_panel(history, window=20), width="stretch")
-
-        ler_vals = [h.get("logical_error_rate", 0.0) for h in history]
-        if any(v > 0 for v in ler_vals):
-            chart_ler.plotly_chart(
-                logical_error_rate_panel(history, window=10),
+        syn = st.session_state.latest_syndrome
+        if syn is not None and len(syn) > 0:
+            _chart_heatmap.plotly_chart(
+                syndrome_heatmap(
+                    syn, distance=_distance,
+                    title=f"Syndrome snapshot — ep {ep}  "
+                          f"{'✅ correct' if st.session_state.latest_correct else '❌ error'}",
+                ),
                 width="stretch",
             )
+            # Live lattice visualization
+            try:
+                action = st.session_state.latest_action
+                reward = history[-1].get("reward", 0.0) if history else 0.0
+                correct = st.session_state.latest_correct
+                viz_result = generate_live_rl_visualization(
+                    distance=_distance,
+                    syndrome=syn,
+                    action=action,
+                    correct=correct,
+                    episode=ep,
+                    reward=reward,
+                    error_locations=st.session_state.get("error_locations"),
+                )
+                _live_lattice.plotly_chart(
+                    viz_result["lattice"],
+                    use_container_width=True,
+                    key=f"frag_lattice_{ep}",
+                )
+            except Exception:
+                pass
 
-    syn = st.session_state.latest_syndrome
-    if syn is not None and len(syn) > 0:
-        hm = syndrome_heatmap(
-            syn, distance=distance,
-            title=f"Syndrome snapshot — ep {ep}  "
-                  f"{'✅ correct' if st.session_state.latest_correct else '❌ error'}",
-        )
-        chart_heatmap.plotly_chart(hm, width="stretch")
+    _live_rl_fragment(
+        status_box, kpi_episode, kpi_reward, kpi_success, kpi_mwpm,
+        chart_metrics, chart_heatmap, chart_ler, live_lattice, distance,
+    )
 
 
 # ==================================================================
@@ -641,7 +664,8 @@ with tab_threshold:
 
     if th_run_btn:
         try:
-            import stim  # noqa: F401 — raises ImportError early if missing
+            import stim  # noqa: F401
+            from concurrent.futures import ThreadPoolExecutor, as_completed
             from surface_code_in_stem.surface_code import surface_code_circuit_string
             from surface_code_in_stem.dynamic import (
                 hexagonal_surface_code,
@@ -665,31 +689,56 @@ with tab_threshold:
 
             p_values = np.linspace(0.003, 0.018, 7) if th_quick else np.linspace(0.001, 0.020, 13)
             shots    = 256 if th_quick else 2048
+            n_workers = min(8, len(th_distances) * len(p_values))
 
-            data: dict[int, list[tuple[float, float]]] = {}
+            def _run_one(d: int, p_val: float) -> tuple[int, float, float]:
+                circ_artifact = builder_fn(distance=d, rounds=d, p=float(p_val))
+                circ_str = circ_artifact if isinstance(circ_artifact, str) else str(circ_artifact)
+                ler = _logical_error_rate(circ_str, shots=shots, seed=7, decoder=decoder)
+                return d, float(p_val), float(ler)
+
+            data: dict[int, list[tuple[float, float]]] = {d: [] for d in th_distances}
             progress = st.progress(0.0)
+            status_text = st.empty()
             total = len(th_distances) * len(p_values)
             done  = 0
 
-            for d in sorted(th_distances):
-                data[d] = []
-                rounds_d = d
-                for p_val in p_values:
-                    circ_artifact = builder_fn(distance=d, rounds=rounds_d, p=float(p_val))
-                    circ_str = circ_artifact if isinstance(circ_artifact, str) else str(circ_artifact)
-                    ler = _logical_error_rate(circ_str, shots=shots, seed=7, decoder=decoder)
-                    data[d].append((float(p_val), float(ler)))
+            all_jobs = [(d, p_val) for d in sorted(th_distances) for p_val in p_values]
+
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                futures = {pool.submit(_run_one, d, p_val): (d, p_val) for d, p_val in all_jobs}
+                for future in as_completed(futures):
+                    d_key, p_val_done, ler_val = future.result()
+                    data[d_key].append((p_val_done, ler_val))
                     done += 1
                     progress.progress(done / total)
+                    status_text.caption(
+                        f"⚡ Parallel sweep: {done}/{total} complete "
+                        f"(d={d_key}, p={p_val_done:.4f} → p_L={ler_val:.4f})"
+                    )
+                    # Live chart update every 4 results
+                    if done % 4 == 0 or done == total:
+                        partial_data = {k: sorted(v) for k, v in data.items() if v}
+                        th_chart.plotly_chart(
+                            threshold_figure(
+                                partial_data,
+                                title=f"{th_builder.title()} — {th_decoder.upper()} (sweeping…)",
+                            ),
+                            width="stretch",
+                        )
 
             progress.empty()
+            status_text.empty()
+
+            # Sort each distance curve by p
+            data = {k: sorted(v) for k, v in data.items()}
 
             # Estimate threshold (first crossing between d[0] and d[1] curves)
             thresh = None
             dists = sorted(data.keys())
             if len(dists) >= 2:
-                curve1 = sorted(data[dists[0]], key=lambda x: x[0])
-                curve2 = sorted(data[dists[1]], key=lambda x: x[0])
+                curve1 = data[dists[0]]
+                curve2 = data[dists[1]]
                 for i in range(len(curve1) - 1):
                     p1,  l1  = curve1[i];    p1n, l1n = curve1[i + 1]
                     _p2, l2  = curve2[i];    _,   l2n = curve2[i + 1]
@@ -704,7 +753,9 @@ with tab_threshold:
             )
             th_chart.plotly_chart(fig, width="stretch")
             if thresh:
-                th_info.success(f"Estimated threshold: **p_th ≈ {thresh:.4f}**")
+                th_info.success(f"✅ Estimated threshold: **p_th ≈ {thresh:.4f}**")
+            else:
+                th_info.info("No crossing found — try more distances or a wider p range.")
 
         except ImportError as exc:
             th_info.error(f"Missing dependency: {exc}")

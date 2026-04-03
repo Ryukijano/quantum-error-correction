@@ -95,7 +95,11 @@ def noisy_layer(
 
 
 def orientation_pairs(
-    measures: List[Coord], orient: int, c2i: Dict[Coord, int], reorder: Sequence[int] | None = None
+    measures: List[Coord],
+    orient: int,
+    c2i: Dict[Coord, int],
+    reorder: Sequence[int] | None = None,
+    reverse: bool = False,
 ) -> List[int]:
     pairs: List[int] = []
     for measure in measures:
@@ -103,7 +107,10 @@ def orientation_pairs(
         if reorder is not None:
             adj = [adj[i] for i in reorder]
         if orient < len(adj) and adj[orient] in c2i:
-            pairs.extend([c2i[measure], c2i[adj[orient]]])
+            if reverse:
+                pairs.extend([c2i[adj[orient]], c2i[measure]])
+            else:
+                pairs.extend([c2i[measure], c2i[adj[orient]]])
     return pairs
 
 
@@ -144,7 +151,7 @@ def stabilizer_cycle(
     reorder = [0, 2, 1, 3]
     for orient in orientations:
         cz_pairs = orientation_pairs(z_measures, orient, c2i)
-        cx_pairs = orientation_pairs(x_measures, orient, c2i, reorder=reorder)
+        cx_pairs = orientation_pairs(x_measures, orient, c2i, reorder=reorder, reverse=(gate == "CX"))
         active_pair_targets = set(cz_pairs) | set(cx_pairs)
         idle_targets = [c2i[q] for q in all_qubits if c2i[q] not in active_pair_targets]
         noisy_layer(builder, gate, cz_pairs, idle_targets, noise_model, f"dynamic_z_orient_{orient}")

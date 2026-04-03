@@ -32,9 +32,9 @@ def iswap_surface_code(distance: int, rounds: int, p: float, noise_model: Option
             layout,
             p=p,
             orientations=orient,
-            gate="ISWAP",
+            gate="CZ",
             noise_model=noise_model,
-            reset_data=False,
+            reset_data=(cycle == 0),
             measure_data=False,
             prev_meas=prev_meas,
         )

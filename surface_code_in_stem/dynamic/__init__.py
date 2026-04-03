@@ -13,3 +13,10 @@ __all__ = [
     "walking_surface_code",
     "xyz2_hexagonal_code",
 ]
+
+def floquet_honeycomb_code(distance: int, rounds: int, p: float, **kwargs) -> str:  # type: ignore[return]
+    raise NotImplementedError(
+        "floquet_honeycomb_code: Floquet code is in development. "
+        "Implementation follows Hastings-Haah 2021 (arXiv:2107.02194). "
+        "Use surface/hexagonal/walking/iswap/xyz2 for threshold sweeps."
+    )
