@@ -324,3 +324,88 @@ class CompositeDecoder(Decoder):
         else:
             # Return first decoder's result
             return corrections[0]
+
+
+class ConcatenatedMWPMDecoder(Decoder):
+    """Concatenated MWPM decoder for colour codes.
+    
+    Implements the 6-matching decoder: 2 MWPM matchings per color (R/G/B)
+    with restricted and unrestricted variants. This is the standard decoder
+    for triangular colour codes from color-code-stim.
+    
+    Reference: Lee & Brown, Quantum 9, 1609 (2025)
+    """
+    
+    def __init__(self, comparative_decoding: bool = False) -> None:
+        """
+        Args:
+            comparative_decoding: If True, run decoder over all distinct
+                logical classes and choose minimum-weight correction.
+        """
+        self.comparative_decoding = comparative_decoding
+        self._color_code: Any | None = None
+    
+    @property
+    def name(self) -> str:
+        return "concatenated_mwpm"
+    
+    def reset(self) -> None:
+        """Reset decoder state."""
+        self._color_code = None
+    
+    def attach_color_code(self, color_code: Any) -> None:
+        """Attach a color-code-stim ColorCode instance.
+        
+        Args:
+            color_code: ColorCode object with concat_matching_decoder method
+        """
+        self._color_code = color_code
+    
+    def decode(self, syndrome: Syndrome) -> Correction:
+        """Decode syndrome using concatenated MWPM.
+        
+        Args:
+            syndrome: Measured stabilizer outcomes (combined X+Z)
+            
+        Returns:
+            Correction indicating logical observable flips
+        """
+        try:
+            from color_code_stim import ColorCode
+        except ImportError as exc:
+            raise ImportError(
+                "color-code-stim is required for ConcatenatedMWPMDecoder. "
+                "Install with: pip install color-code-stim"
+            ) from exc
+        
+        if self._color_code is None:
+            raise RuntimeError(
+                "ConcatenatedMWPMDecoder requires attach_color_code() before decode()"
+            )
+        
+        # Concatenate X and Z syndrome into full detection event vector
+        det_events = np.concatenate([
+            syndrome.x_syndrome.astype(np.uint8),
+            syndrome.z_syndrome.astype(np.uint8)
+        ])
+        
+        # Use color-code-stim's concatenated matching decoder
+        try:
+            prediction = self._color_code.concat_matching_decoder(
+                det_events,
+                comparative_decoding=self.comparative_decoding
+            )
+            # prediction is typically a bool or int indicating logical flip
+            x_flip = bool(prediction) if isinstance(prediction, (bool, np.bool_)) else bool(prediction[0])
+            return Correction(
+                x_flips=np.array([x_flip], dtype=bool),
+                z_flips=np.zeros(1, dtype=bool),  # Simplified: colour codes have 1 logical
+                confidence=1.0
+            )
+        except Exception:
+            # Fallback: return empty correction with low confidence
+            return Correction(
+                x_flips=np.zeros(1, dtype=bool),
+                z_flips=np.zeros(1, dtype=bool),
+                confidence=0.5
+            )

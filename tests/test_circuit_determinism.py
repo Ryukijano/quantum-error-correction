@@ -49,6 +49,34 @@ def _build_xyz2(distance: int, rounds: int, p: float) -> stim.Circuit:
     return xyz2_hexagonal_code(distance=distance, rounds=rounds, p=p)
 
 
+# Colour code builders (optional dependencies)
+def _build_color_code(distance: int, rounds: int, p: float) -> stim.Circuit:
+    """Build colour code circuit using color-code-stim."""
+    try:
+        from color_code_stim import ColorCode, NoiseModel as CCNoiseModel
+        from syndrome_net import CircuitSpec
+        from syndrome_net.codes import ColorCodeStimBuilder
+        
+        spec = CircuitSpec(distance=distance, rounds=rounds, error_probability=p, circuit_type="tri")
+        builder = ColorCodeStimBuilder()
+        return builder.build(spec)
+    except ImportError as exc:
+        pytest.skip(f"color-code-stim not installed: {exc}")
+
+
+def _build_loom_color_code(distance: int, rounds: int, p: float) -> stim.Circuit:
+    """Build colour code circuit using el-loom."""
+    try:
+        from syndrome_net import CircuitSpec
+        from syndrome_net.codes import LoomColorCodeBuilder
+        
+        spec = CircuitSpec(distance=distance, rounds=rounds, error_probability=p)
+        builder = LoomColorCodeBuilder()
+        return builder.build(spec)
+    except ImportError as exc:
+        pytest.skip(f"el-loom not installed: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Parametrized determinism tests
 # ---------------------------------------------------------------------------
@@ -59,6 +87,11 @@ BUILDERS = {
     "walking": _build_walking,
     "iswap": _build_iswap,
     "xyz2": _build_xyz2,
+}
+
+COLOUR_CODE_BUILDERS = {
+    "color_code": _build_color_code,
+    "loom_color_code": _build_loom_color_code,
 }
 
 DISTANCES = [3, 5]
@@ -102,6 +135,45 @@ def test_has_observable(name: str, builder) -> None:
 @pytest.mark.parametrize("name,builder", BUILDERS.items())
 def test_sample_without_error(name: str, builder) -> None:
     """Monte Carlo sampling must succeed without exceptions."""
+    circuit = builder(distance=3, rounds=3, p=0.01)
+    sampler = circuit.compile_detector_sampler(seed=42)
+    det, obs = sampler.sample(100, separate_observables=True)
+    assert det.shape[0] == 100
+    assert obs.shape[0] == 100
+
+
+# ---------------------------------------------------------------------------
+# Colour code determinism tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,builder", COLOUR_CODE_BUILDERS.items())
+@pytest.mark.parametrize("distance", [3, 5])  # Odd distances for triangular
+@pytest.mark.parametrize("p", [0.001, 0.01])
+def test_colour_code_deterministic(name: str, builder, distance: int, p: float) -> None:
+    """Colour code circuits must be deterministic."""
+    circuit = builder(distance=distance, rounds=distance, p=p)
+    _check_deterministic(circuit, f"{name}(d={distance},p={p})")
+
+
+@pytest.mark.parametrize("name,builder", COLOUR_CODE_BUILDERS.items())
+def test_colour_code_has_detectors(name: str, builder) -> None:
+    """Colour code circuits must define detectors."""
+    circuit = builder(distance=3, rounds=3, p=0.001)
+    assert circuit.num_detectors > 0, f"{name}: no detectors defined"
+
+
+@pytest.mark.parametrize("name,builder", COLOUR_CODE_BUILDERS.items())
+def test_colour_code_has_observable(name: str, builder) -> None:
+    """Colour code circuits must define one logical observable."""
+    circuit = builder(distance=3, rounds=3, p=0.001)
+    assert circuit.num_observables == 1, (
+        f"{name}: expected 1 observable, got {circuit.num_observables}"
+    )
+
+
+@pytest.mark.parametrize("name,builder", COLOUR_CODE_BUILDERS.items())
+def test_colour_code_sample_without_error(name: str, builder) -> None:
+    """Colour code Monte Carlo sampling must succeed."""
     circuit = builder(distance=3, rounds=3, p=0.01)
     sampler = circuit.compile_detector_sampler(seed=42)
     det, obs = sampler.sample(100, separate_observables=True)

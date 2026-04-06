@@ -409,3 +409,394 @@ class QECCodeDiscoveryEnv(gym.Env):
         })
         
         return self._state.copy(), float(reward), terminated, truncated, info
+
+
+class ColourCodeGymEnv(gym.Env):
+    """Gym environment for RL decoding of colour codes.
+    
+    Extends the QECGymEnv pattern to colour codes from color-code-stim.
+    The agent observes colour code syndromes and predicts logical corrections.
+    
+    Supports triangular (d odd) and rectangular (d even) colour code patches.
+    Uses concatenated MWPM as baseline decoder for comparison.
+    
+    Reference: Lee & Brown, Quantum 9, 1609 (2025)
+    """
+    
+    metadata = {"render.modes": ["human"]}
+    
+    def __init__(
+        self,
+        distance: int = 5,
+        rounds: int = 5,
+        physical_error_rate: float = 0.001,
+        circuit_type: str = "tri",
+        seed: Optional[int] = None,
+        use_mwpm_baseline: bool = True,
+        use_superdense: bool = False
+    ):
+        super().__init__()
+        
+        if not HAS_STIM:
+            raise ImportError("Stim is required for ColourCodeGymEnv")
+        
+        try:
+            from color_code_stim import ColorCode, NoiseModel as CCNoiseModel
+        except ImportError as exc:
+            raise ImportError(
+                "color-code-stim is required. Install with: pip install color-code-stim"
+            ) from exc
+        
+        self.distance = distance
+        self.rounds = rounds
+        self.p = physical_error_rate
+        self.circuit_type = circuit_type
+        self.use_superdense = use_superdense
+        self.use_mwpm_baseline = use_mwpm_baseline
+        
+        self._rng = np.random.default_rng(seed)
+        self._seed_val = seed if seed is not None else self._rng.integers(0, 2**31 - 1)
+        
+        # Build colour code circuit
+        noise = CCNoiseModel.uniform_circuit_noise(self.p)
+        kwargs = dict(
+            d=self.distance,
+            rounds=self.rounds,
+            circuit_type=self.circuit_type,
+            noise_model=noise,
+            superdense_circuit=self.use_superdense,
+        )
+        self._color_code = ColorCode(**kwargs)
+        self.circuit = self._color_code.circuit
+        self.num_detectors = self.circuit.num_detectors
+        self.num_observables = self.circuit.num_observables
+        self.sampler = self.circuit.compile_detector_sampler(seed=self._seed_val)
+        
+        # Define spaces
+        self.observation_space = spaces.MultiBinary(self.num_detectors)
+        self.action_space = spaces.MultiDiscrete([2] * self.num_observables)
+        
+        self._current_syndrome: Optional[np.ndarray] = None
+        self._current_logical: Optional[np.ndarray] = None
+        
+        if self.use_mwpm_baseline:
+            from surface_code_in_stem.decoders import DecoderMetadata
+            self._decoder_metadata = DecoderMetadata(
+                num_observables=self.num_observables,
+                detector_error_model=self.circuit.detector_error_model(decompose_errors=True),
+                circuit=self.circuit,
+                seed=self._seed_val
+            )
+    
+    def reset(
+        self,
+        *,
+        seed: Optional[int] = None,
+        options: Optional[dict] = None,
+    ) -> Tuple[np.ndarray, dict]:
+        super().reset(seed=seed)
+        if seed is not None:
+            self._seed_val = seed
+            self.sampler = self.circuit.compile_detector_sampler(seed=seed)
+        
+        det_samples_bool, obs_samples = self.sampler.sample(1, separate_observables=True)
+        det_samples = det_samples_bool[0].astype(np.int8)
+        self._current_logical = obs_samples[0].astype(np.int8)
+        self._current_syndrome = det_samples
+        
+        info = {"binary_syndrome": det_samples}
+        
+        if self.use_mwpm_baseline:
+            try:
+                prediction = self._color_code.concat_matching_decoder(det_samples_bool[0])
+                mwpm_pred = np.array([int(prediction)], dtype=np.int8)
+                mwpm_correct = np.all(mwpm_pred == self._current_logical)
+                info["mwpm_prediction"] = mwpm_pred
+                info["mwpm_correct"] = mwpm_correct
+            except Exception:
+                pass
+        
+        return self._current_syndrome, info
+    
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        if self._current_syndrome is None or self._current_logical is None:
+            raise RuntimeError("Cannot step before calling reset()")
+        
+        action = np.asarray(action, dtype=np.int8)
+        if action.shape != (self.num_observables,):
+            raise ValueError(f"Action shape must be ({self.num_observables},)")
+        
+        is_correct = np.all(action == self._current_logical)
+        reward = 1.0 if is_correct else -1.0
+        
+        terminated = True
+        truncated = False
+        
+        info = {
+            "actual_logical": self._current_logical,
+            "is_correct": is_correct,
+            "error_rate_p": self.p
+        }
+        
+        next_obs = np.zeros_like(self._current_syndrome)
+        return next_obs, reward, terminated, truncated, info
+    
+    def render(self, mode: str = "human") -> None:
+        if mode != "human":
+            raise NotImplementedError("Only human render mode supported")
+        if self._current_syndrome is not None:
+            print(f"Colour code syndrome (N={self.num_detectors}): {np.sum(self._current_syndrome)} defects")
+            print(f"Actual Logical: {self._current_logical}")
+
+
+class ColourCodeDiscoveryEnv(gym.Env):
+    """RL environment for discovering colour code parameters.
+    
+    Extends QECCodeDiscoveryEnv with colour-code-specific constraints:
+    - 3-colourability of the lattice
+    - Hexagonal lattice structure
+    - Transversal Clifford gate compatibility
+    
+    Agent explores distance, patch geometry, and noise thresholds.
+    """
+    
+    def __init__(
+        self,
+        max_distance: int = 13,
+        min_distance: int = 3,
+        max_rounds: int = 10,
+        target_threshold: float = 0.005,
+        max_steps: int = 20
+    ):
+        super().__init__()
+        
+        self.max_distance = max_distance
+        self.min_distance = min_distance
+        self.max_rounds = max_rounds
+        self.target_threshold = target_threshold
+        self.max_steps = max_steps
+        
+        # State: [distance_idx, circuit_type_idx, rounds, superdense_flag, p_rate]
+        # Action: adjust one of these parameters or submit
+        self.observation_space = spaces.Box(
+            low=np.array([0, 0, 1, 0, 0.0001]),
+            high=np.array([10, 4, max_rounds, 1, 0.02]),
+            dtype=np.float32
+        )
+        
+        # Actions: 0=inc_distance, 1=dec_distance, 2=change_type, 3=toggle_superdense,
+        # 4=inc_rounds, 5=dec_rounds, 6=adjust_p, 7=submit
+        self.action_space = spaces.Discrete(8)
+        
+        self.circuit_types = ["tri", "rec", "growing", "cult+growing"]
+        self._state = np.array([2, 0, 5, 0, 0.001], dtype=np.float32)  # d=7, tri, 5 rounds
+        self.current_step = 0
+    
+    def reset(
+        self,
+        *,
+        seed: Optional[int] = None,
+        options: Optional[dict] = None,
+    ) -> Tuple[np.ndarray, dict]:
+        super().reset(seed=seed)
+        self._state = np.array([2, 0, 5, 0, 0.001], dtype=np.float32)
+        self.current_step = 0
+        return self._state.copy(), {}
+    
+    def _get_distance(self) -> int:
+        idx = int(self._state[0])
+        distances = [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23]
+        return distances[min(idx, len(distances)-1)]
+    
+    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        self.current_step += 1
+        terminated = False
+        truncated = self.current_step >= self.max_steps
+        reward = -0.01  # Small step penalty
+        
+        if action == 0:  # inc_distance
+            self._state[0] = min(self._state[0] + 1, 10)
+        elif action == 1:  # dec_distance
+            self._state[0] = max(self._state[0] - 1, 0)
+        elif action == 2:  # change circuit type
+            self._state[1] = (int(self._state[1]) + 1) % len(self.circuit_types)
+        elif action == 3:  # toggle superdense
+            self._state[3] = 1 - self._state[3]
+        elif action == 4:  # inc_rounds
+            self._state[2] = min(self._state[2] + 1, self.max_rounds)
+        elif action == 5:  # dec_rounds
+            self._state[2] = max(self._state[2] - 1, 1)
+        elif action == 6:  # adjust p (small random change)
+            delta = np.random.uniform(-0.001, 0.001)
+            self._state[4] = np.clip(self._state[4] + delta, 0.0001, 0.02)
+        elif action == 7:  # submit
+            terminated = True
+            reward = self._evaluate_code()
+        
+        if truncated and not terminated:
+            terminated = True
+            reward = self._evaluate_code()
+        
+        info = {
+            "distance": self._get_distance(),
+            "circuit_type": self.circuit_types[int(self._state[1])],
+            "rounds": int(self._state[2]),
+            "superdense": bool(self._state[3]),
+            "p": float(self._state[4])
+        }
+        
+        return self._state.copy(), float(reward), terminated, truncated, info
+    
+    def _evaluate_code(self) -> float:
+        """Evaluate colour code parameters and return reward."""
+        d = self._get_distance()
+        circuit_type = self.circuit_types[int(self._state[1])]
+        rounds = int(self._state[2])
+        superdense = bool(self._state[3])
+        p = float(self._state[4])
+        
+        # Validation: distance constraints
+        if circuit_type == "tri" and d % 2 == 0:
+            return -1.0  # Triangular requires odd distance
+        if circuit_type == "rec" and d % 2 != 0:
+            return -0.5  # Rectangular prefers even distance
+        
+        # Simulate to estimate logical error rate
+        try:
+            from color_code_stim import ColorCode, NoiseModel as CCNoiseModel
+            noise = CCNoiseModel.uniform_circuit_noise(p)
+            cc = ColorCode(d=d, rounds=rounds, circuit_type=circuit_type, 
+                          noise_model=noise, superdense_circuit=superdense)
+            num_fails, _ = cc.simulate(shots=1000)
+            ler = num_fails / 1000
+            
+            # Reward: below threshold is good
+            if ler < self.target_threshold:
+                return 1.0 + (self.target_threshold - ler) * 100  # Bonus for beating threshold
+            else:
+                return -ler * 10  # Penalty proportional to error rate
+        except Exception:
+            return -0.5  # Simulation failure penalty
+
+
+class ColourCodeCalibrationEnv(gym.Env):
+    """RL environment for calibrating colour code experiments.
+    
+    Continuous control of per-qubit error rates and timing parameters
+    to optimize logical error rate for a fixed colour code configuration.
+    
+    State: detector statistics from recent syndrome measurements
+    Action: continuous adjustments to calibration parameters
+    Reward: improvement in logical error rate
+    """
+    
+    def __init__(
+        self,
+        distance: int = 5,
+        rounds: int = 5,
+        circuit_type: str = "tri",
+        parameter_dim: int = 6,
+        batch_shots: int = 128,
+        base_error_rate: float = 0.001,
+        seed: Optional[int] = None
+    ):
+        super().__init__()
+        
+        try:
+            from color_code_stim import ColorCode, NoiseModel as CCNoiseModel
+        except ImportError as exc:
+            raise ImportError(
+                "color-code-stim is required. Install with: pip install color-code-stim"
+            ) from exc
+        
+        self.distance = distance
+        self.rounds = rounds
+        self.circuit_type = circuit_type
+        self.parameter_dim = parameter_dim
+        self.batch_shots = batch_shots
+        self.base_error_rate = base_error_rate
+        self._seed = seed if seed is not None else 0
+        
+        # Initial circuit
+        noise = CCNoiseModel.uniform_circuit_noise(base_error_rate)
+        self._color_code = ColorCode(
+            d=distance, rounds=rounds, circuit_type=circuit_type,
+            noise_model=noise, superdense_circuit=False
+        )
+        
+        # State: detector rate statistics
+        self.observation_space = spaces.Box(
+            low=0.0, high=1.0, shape=(3,), dtype=np.float32
+        )  # [mean_defect_rate, cycle_time_proxy, parameter_drift]
+        
+        # Action: continuous calibration adjustments
+        self.action_space = spaces.Box(
+            low=-0.05, high=0.05, shape=(parameter_dim,), dtype=np.float32
+        )
+        
+        self._current_params = np.zeros(parameter_dim, dtype=np.float32)
+        self.max_steps = 50
+        self.current_step = 0
+        self._last_ler = 1.0
+    
+    def reset(
+        self,
+        *,
+        seed: Optional[int] = None,
+        options: Optional[dict] = None,
+    ) -> Tuple[np.ndarray, dict]:
+        super().reset(seed=seed)
+        self.current_step = 0
+        self._current_params = np.zeros(self.parameter_dim, dtype=np.float32)
+        self._last_ler = 1.0
+        
+        # Initial observation
+        obs = self._measure_state()
+        return obs.astype(np.float32), {}
+    
+    def _measure_state(self) -> np.ndarray:
+        """Measure detector statistics from colour code."""
+        try:
+            sampler = self._color_code.circuit.compile_detector_sampler(seed=self._seed + self.current_step)
+            det_samples, _ = sampler.sample(self.batch_shots, separate_observables=True)
+            mean_defect_rate = np.mean(det_samples)
+        except Exception:
+            mean_defect_rate = self.base_error_rate
+        
+        cycle_time_proxy = 1.0 + 0.1 * np.sum(np.abs(self._current_params))
+        param_drift = np.mean(np.abs(self._current_params))
+        
+        return np.array([mean_defect_rate, cycle_time_proxy, param_drift], dtype=np.float32)
+    
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        self.current_step += 1
+        
+        # Apply parameter adjustments
+        self._current_params += action
+        self._current_params = np.clip(self._current_params, -1.0, 1.0)
+        
+        # Measure new state
+        obs = self._measure_state()
+        
+        # Estimate logical error rate
+        try:
+            num_fails, _ = self._color_code.simulate(shots=self.batch_shots)
+            ler = num_fails / self.batch_shots
+        except Exception:
+            ler = 1.0
+        
+        # Reward: improvement in LER
+        improvement = self._last_ler - ler
+        reward = improvement * 10  # Scale up for meaningful rewards
+        self._last_ler = ler
+        
+        terminated = False
+        truncated = self.current_step >= self.max_steps
+        
+        info = {
+            "logical_error_rate": ler,
+            "params": self._current_params.copy(),
+            "mean_defect_rate": obs[0]
+        }
+        
+        return obs.astype(np.float32), float(reward), terminated, truncated, info

@@ -116,8 +116,9 @@ class UnionFindDecoder(DecoderProtocol):
 
                 cluster = uf_nodes[root]
                 new_boundary = set()
+                boundary_snapshot = list(cluster.boundary_nodes)
 
-                for boundary_node in cluster.boundary_nodes:
+                for boundary_node in boundary_snapshot:
                     for neighbor in adjacency.get(boundary_node, []):
                         if neighbor not in cluster.detectors:
                             neighbor_root = self._find_root(uf_nodes, neighbor)
@@ -139,8 +140,9 @@ class UnionFindDecoder(DecoderProtocol):
                     clusters_neutralized.add(root)
 
             roots = self._get_all_roots(uf_nodes)
-            for i, root1 in enumerate(roots):
-                for root2 in roots[i+1:]:
+            roots_list = list(roots)
+            for i, root1 in enumerate(roots_list):
+                for root2 in roots_list[i+1:]:
                     cluster1 = uf_nodes[root1]
                     cluster2 = uf_nodes[root2]
                     if cluster1.boundary_nodes & cluster2.boundary_nodes:

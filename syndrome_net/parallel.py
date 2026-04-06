@@ -5,11 +5,12 @@ and distributed threshold estimation.
 """
 from __future__ import annotations
 
-from typing import Callable, Iterator, Any
-from functools import partial
+from typing import Callable, Iterator, Any, Optional
+from functools import partial, lru_cache
 from dataclasses import dataclass
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+import threading
 
 import numpy as np
 from numpy.typing import NDArray
@@ -23,6 +24,12 @@ except ImportError:
     JAX_AVAILABLE = False
     jax = None
     jnp = None
+
+try:
+    from color_code_stim import ColorCode, NoiseModel as CCNoiseModel
+    COLOR_CODE_AVAILABLE = True
+except ImportError:
+    COLOR_CODE_AVAILABLE = False
 
 from syndrome_net import CircuitBuilder, CircuitSpec, ThresholdResult
 from syndrome_net.container import DIContainer, get_container
@@ -370,3 +377,222 @@ def vmap_if_available(fn: Callable) -> Callable:
     def wrapper(x):
         return [fn(xi) for xi in x]
     return wrapper
+
+
+class CircuitCache:
+    """Thread-safe LRU cache for compiled Stim circuits.
+    
+    Avoids rebuilding expensive circuits during threshold sweeps.
+    Keyed by CircuitSpec hash.
+    """
+    
+    def __init__(self, maxsize: int = 128):
+        self._cache: dict[int, stim.Circuit] = {}
+        self._lock = threading.Lock()
+        self._maxsize = maxsize
+        self._access_order: list[int] = []
+    
+    def get(self, spec: CircuitSpec) -> Optional[stim.Circuit]:
+        """Get cached circuit for spec if available."""
+        key = hash(spec)
+        with self._lock:
+            if key in self._cache:
+                # Move to end (most recently used)
+                self._access_order.remove(key)
+                self._access_order.append(key)
+                return self._cache[key]
+        return None
+    
+    def put(self, spec: CircuitSpec, circuit: stim.Circuit) -> None:
+        """Cache a circuit for the given spec."""
+        key = hash(spec)
+        with self._lock:
+            if key in self._cache:
+                # Update existing
+                self._access_order.remove(key)
+            elif len(self._cache) >= self._maxsize:
+                # Evict least recently used
+                lru_key = self._access_order.pop(0)
+                del self._cache[lru_key]
+            
+            self._cache[key] = circuit
+            self._access_order.append(key)
+    
+    def clear(self) -> None:
+        """Clear all cached circuits."""
+        with self._lock:
+            self._cache.clear()
+            self._access_order.clear()
+    
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
+class ParallelColorCodeEstimator:
+    """Parallel threshold estimation for colour codes.
+    
+    Uses ProcessPoolExecutor for colour code circuits (heavier than surface codes)
+    and circuit caching to avoid rebuilding expensive colour code circuits.
+    
+    Reference: Lee & Brown, Quantum 9, 1609 (2025)
+    """
+    
+    def __init__(self, config: ParallelConfig | None = None) -> None:
+        self.config = config or ParallelConfig()
+        self._cache = CircuitCache(maxsize=256)
+        self._cache_lock = threading.Lock()
+    
+    def estimate_threshold_colour_code(
+        self,
+        distances: list[int],
+        ps: list[float],
+        circuit_type: str = "tri",
+        rounds_per_d: bool = True,
+        shots: int = 10000,
+        use_superdense: bool = False
+    ) -> ThresholdResult:
+        """Estimate colour code threshold via parallel simulation.
+        
+        Args:
+            distances: List of code distances (must be odd for triangular)
+            ps: List of error probabilities to test
+            circuit_type: Circuit type ('tri', 'rec', 'growing', 'cult+growing')
+            rounds_per_d: If True, rounds = distance, else fixed rounds
+            shots: Number of Monte Carlo samples per (distance, p)
+            use_superdense: Use superdense syndrome extraction
+            
+        Returns:
+            Threshold estimation results
+        """
+        if not COLOR_CODE_AVAILABLE:
+            raise ImportError(
+                "color-code-stim is required for colour code threshold estimation. "
+                "Install with: pip install color-code-stim"
+            )
+        
+        # Validate distances
+        if circuit_type == "tri":
+            for d in distances:
+                if d % 2 == 0:
+                    raise ValueError(f"Triangular colour code requires odd distance, got {d}")
+        
+        # Generate jobs
+        jobs = []
+        for d in distances:
+            rounds = d if rounds_per_d else max(distances)
+            for p in ps:
+                jobs.append((d, rounds, p, circuit_type, shots, use_superdense))
+        
+        # Run parallel simulation
+        n_workers = min(self.config.n_workers or mp.cpu_count(), len(jobs))
+        results: dict[tuple[int, float], float] = {}
+        
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(self._simulate_one, job): job for job in jobs}
+            
+            for future in futures:
+                d, rounds, p, _, _, _ = futures[future]
+                ler = future.result()
+                results[(d, p)] = ler
+        
+        # Compute threshold from crossing
+        threshold = self._compute_threshold_colour_code(distances, ps, results)
+        
+        return ThresholdResult(
+            threshold=threshold,
+            confidence_interval=(threshold * 0.9, threshold * 1.1),
+            crossing_points=[],
+            logical_error_rates=results
+        )
+    
+    def _simulate_one(
+        self,
+        job: tuple[int, int, float, str, int, bool]
+    ) -> float:
+        """Simulate a single (distance, p) point."""
+        d, rounds, p, circuit_type, shots, use_superdense = job
+        
+        # Check cache first
+        spec = CircuitSpec(
+            distance=d,
+            rounds=rounds,
+            error_probability=p,
+            circuit_type=circuit_type,
+            superdense=use_superdense
+        )
+        
+        cached_circuit = None
+        with self._cache_lock:
+            cached_circuit = self._cache.get(spec)
+        
+        if cached_circuit is not None:
+            cc = cached_circuit
+        else:
+            # Build circuit
+            noise = CCNoiseModel.uniform_circuit_noise(p)
+            cc = ColorCode(
+                d=d,
+                rounds=rounds,
+                circuit_type=circuit_type,
+                noise_model=noise,
+                superdense_circuit=use_superdense
+            )
+            # Cache for reuse
+            with self._cache_lock:
+                self._cache.put(spec, cc)
+        
+        # Run simulation
+        num_fails, _ = cc.simulate(shots=shots)
+        return num_fails / shots
+    
+    def _compute_threshold_colour_code(
+        self,
+        distances: list[int],
+        ps: list[float],
+        error_rates: dict[tuple[int, float], float]
+    ) -> float:
+        """Compute threshold from colour code error rate data."""
+        # Find crossing point where larger distances have higher error rates
+        sorted_ps = sorted(ps)
+        
+        for i, p in enumerate(sorted_ps[:-1]):
+            # Get error rates at this p for all distances
+            rates = [(d, error_rates.get((d, p), 1.0)) for d in distances]
+            rates.sort(key=lambda x: x[0])
+            
+            # Check if rates increase with distance (below threshold)
+            if len(rates) >= 2:
+                increasing = all(rates[j][1] < rates[j+1][1] for j in range(len(rates)-1))
+                if increasing:
+                    # Threshold is around this p
+                    return (p + sorted_ps[i+1]) / 2
+        
+        # Fallback: return middle p value
+        return sorted_ps[len(sorted_ps) // 2]
+    
+    def get_cache_stats(self) -> dict[str, Any]:
+        """Get circuit cache statistics."""
+        return {
+            "cached_circuits": len(self._cache),
+            "max_size": self._cache._maxsize,
+            "hit_rate": "N/A"  # Would need to track hits/misses
+        }
+    
+    def clear_cache(self) -> None:
+        """Clear the circuit cache."""
+        self._cache.clear()
+
+
+class ColorCodeError(Exception):
+    """Base exception for colour code operations."""
+    pass
+
+
+class InvalidColorCodeSpecError(ColorCodeError):
+    """Raised when an invalid colour code specification is provided."""
+    pass
+
+
+class LoomIntegrationError(ColorCodeError):
+    """Raised when el-loom integration fails."""
+    pass

@@ -6,8 +6,8 @@ noise models, and visualization backends.
 """
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable, Any
-from dataclasses import dataclass
+from typing import Protocol, runtime_checkable, Any, Optional
+from dataclasses import dataclass, field
 from abc import abstractmethod
 
 import stim
@@ -23,10 +23,18 @@ class CircuitSpec:
         distance: Code distance (number of data qubits along logical operator)
         rounds: Number of syndrome measurement rounds
         error_probability: Physical error rate
+        circuit_type: Colour code patch type (tri/rec/growing/cult+growing)
+        d2: Secondary distance for rectangular/growing colour codes
+        superdense: Use superdense syndrome extraction (colour codes)
+        code_family: Override code family name (for generic builders)
     """
     distance: int
     rounds: int
     error_probability: float
+    circuit_type: Optional[str] = None
+    d2: Optional[int] = None
+    superdense: bool = False
+    code_family: Optional[str] = None
 
 
 @dataclass(frozen=True)

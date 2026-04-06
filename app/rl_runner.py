@@ -121,7 +121,19 @@ class RLRunner:
 
     def start(self) -> None:
         self._stop_event.clear()
-        target = self._run_ppo if self.mode == "ppo" else self._run_sac
+        # Dispatch to appropriate training loop based on mode
+        if self.mode == "ppo":
+            target = self._run_ppo
+        elif self.mode == "sac":
+            target = self._run_sac
+        elif self.mode == "ppo_colour":
+            target = self._run_ppo_colour
+        elif self.mode == "sac_colour":
+            target = self._run_sac_colour
+        elif self.mode == "discover_colour":
+            target = self._run_discover_colour
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
         self._thread = threading.Thread(target=target, daemon=True)
         self._thread.start()
 
@@ -318,3 +330,224 @@ class RLRunner:
             self.event_queue.put_nowait(event)
         except queue.Full:
             pass  # drop oldest by discarding the new one; UI will catch up on next poll
+
+    # ------------------------------------------------------------------
+    # Colour Code Training Loops
+    # ------------------------------------------------------------------
+
+    def _run_ppo_colour(self) -> None:
+        """PPO training on colour code decoding."""
+        try:
+            import torch
+            from surface_code_in_stem.rl_control.gym_env import ColourCodeGymEnv
+            from surface_code_in_stem.rl_control.sota_agents import PPOAgent
+
+            env = ColourCodeGymEnv(
+                distance=self.distance,
+                rounds=self.rounds,
+                physical_error_rate=self.p,
+                use_mwpm_baseline=True,
+            )
+            state_dim = env.observation_space.shape[0]
+            action_dim = len(env.action_space.nvec)
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            agent = PPOAgent(state_dim=state_dim, action_dim=action_dim, device=device)
+
+            states, actions, log_probs, rewards, values = [], [], [], [], []
+            success_hist: list[float] = []
+            mwpm_hist: list[float] = []
+
+            for ep in range(self.episodes):
+                if self._stop_event.is_set():
+                    break
+
+                state, info = env.reset()
+                action, log_prob, value = agent.select_action(state)
+                _, reward, _, _, env_info = env.step(action)
+
+                correct = bool(env_info.get("is_correct", False))
+                states.append(state)
+                actions.append(action)
+                log_probs.append(log_prob)
+                rewards.append(reward)
+                values.append(value)
+                success_hist.append(1.0 if correct else 0.0)
+                mwpm_hist.append(1.0 if info.get("mwpm_correct", False) else 0.0)
+
+                if ep % self.syndrome_emit_every == 0:
+                    syndrome_arr = np.asarray(info.get("binary_syndrome", state), dtype=np.int8)
+                    evt = SyndromeEvent(syndrome_arr, np.asarray(action), correct, ep + 1)
+                    self._push(evt)
+
+                if (ep + 1) % self.batch_size == 0:
+                    ret_t = torch.FloatTensor(rewards)
+                    val_t = torch.FloatTensor(values)
+                    adv_t = ret_t - val_t
+                    s_t = torch.FloatTensor(np.array(states))
+                    a_t = torch.FloatTensor(np.array(actions))
+                    lp_t = torch.FloatTensor(log_probs)
+                    loss_d = agent.update(s_t, a_t, lp_t, ret_t, adv_t)
+                    states, actions, log_probs, rewards, values = [], [], [], [], []
+
+                    window = min(self.batch_size, len(success_hist))
+                    metric = {
+                        "episode": ep + 1,
+                        "reward": float(reward),
+                        "rl_success": float(np.mean(success_hist[-window:])),
+                        "mwpm_success": float(np.mean(mwpm_hist[-window:])),
+                        "policy_loss": float(loss_d.get("policy_loss", 0)),
+                        "value_loss": float(loss_d.get("value_loss", 0)),
+                        "logical_error_rate": 0.0,
+                        "effective_p": 0.0,
+                    }
+                    self._push(MetricEvent(metric))
+                    if self._on_metric:
+                        self._on_metric(metric)
+
+            self._push(DoneEvent(self.episodes))
+
+        except Exception as exc:
+            self._push(ErrorEvent(str(exc)))
+
+    def _run_sac_colour(self) -> None:
+        """SAC continuous control for colour code calibration."""
+        try:
+            import torch
+            from surface_code_in_stem.rl_control.gym_env import ColourCodeCalibrationEnv
+            from surface_code_in_stem.rl_control.sota_agents import ContinuousSACAgent
+            from surface_code_in_stem.rl_control.replay_buffer import ReplayBuffer, Experience
+
+            env = ColourCodeCalibrationEnv(
+                distance=self.distance,
+                rounds=self.rounds,
+                parameter_dim=6,
+                batch_shots=64,
+                base_error_rate=self.p,
+            )
+            state_dim = env.observation_space.shape[0]
+            action_dim = env.action_space.shape[0]
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            agent = ContinuousSACAgent(
+                state_dim=state_dim,
+                action_dim=action_dim,
+                action_space=env.action_space,
+                use_diffusion=self.use_diffusion,
+                device=device,
+            )
+            buffer = ReplayBuffer(capacity=5000, prioritized=False)
+
+            for ep in range(self.episodes):
+                if self._stop_event.is_set():
+                    break
+
+                state, _ = env.reset()
+                ep_reward, done = 0.0, False
+                ep_info: dict = {}
+
+                while not done:
+                    if self._stop_event.is_set():
+                        break
+                    if len(buffer) > self.batch_size:
+                        action = agent.select_action(state, evaluate=False)
+                    else:
+                        action = env.action_space.sample()
+
+                    next_state, reward, terminated, truncated, info = env.step(action)
+                    done = terminated or truncated
+                    ep_reward += reward
+                    ep_info = info
+
+                    buffer.push(Experience(
+                        state=torch.FloatTensor(state),
+                        action=torch.FloatTensor(action),
+                        reward=float(reward),
+                        next_state=torch.FloatTensor(next_state),
+                        done=bool(done),
+                    ))
+                    state = next_state
+
+                    if len(buffer) > self.batch_size:
+                        s_b, a_b, r_b, ns_b, d_b, _, _ = buffer.sample(self.batch_size)
+                        mask_b = 1.0 - d_b.float()
+                        agent.update_parameters(s_b, a_b, r_b, ns_b, mask_b)
+
+                ler = float(ep_info.get("logical_error_rate", 0.0))
+                metric = {
+                    "episode": ep + 1,
+                    "reward": ep_reward,
+                    "rl_success": 0.0,
+                    "mwpm_success": 0.0,
+                    "logical_error_rate": ler,
+                    "effective_p": float(ep_info.get("mean_defect_rate", 0.0)),
+                    "policy_loss": 0.0,
+                    "value_loss": 0.0,
+                }
+                self._push(MetricEvent(metric))
+                if self._on_metric:
+                    self._on_metric(metric)
+
+                if ep % self.syndrome_emit_every == 0:
+                    dummy = np.zeros(max(1, state_dim), dtype=np.int8)
+                    self._push(SyndromeEvent(dummy, np.array(action), ler < self.p, ep + 1))
+
+            self._push(DoneEvent(self.episodes))
+
+        except Exception as exc:
+            self._push(ErrorEvent(str(exc)))
+
+    def _run_discover_colour(self) -> None:
+        """RL agent discovers optimal colour code parameters."""
+        try:
+            import torch
+            from surface_code_in_stem.rl_control.gym_env import ColourCodeDiscoveryEnv
+            from surface_code_in_stem.rl_control.sota_agents import PPOAgent
+
+            env = ColourCodeDiscoveryEnv(
+                max_distance=13,
+                target_threshold=0.005,
+                max_steps=20,
+            )
+            # Discovery env has different observation space - adapt
+            state_dim = env.observation_space.shape[0]
+            # Use discrete action wrapper or simple policy
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            
+            # Simple tabular/policy gradient approach for discovery
+            discovery_metrics: list[dict] = []
+            
+            for ep in range(self.episodes):
+                if self._stop_event.is_set():
+                    break
+
+                state, info = env.reset()
+                done = False
+                total_reward = 0.0
+                
+                while not done:
+                    if self._stop_event.is_set():
+                        break
+                    # Simple heuristic policy: submit after exploring a few params
+                    action = np.random.randint(0, env.action_space.n)
+                    state, reward, terminated, truncated, step_info = env.step(action)
+                    done = terminated or truncated
+                    total_reward += reward
+                
+                # Log discovery results
+                metric = {
+                    "episode": ep + 1,
+                    "reward": total_reward,
+                    "rl_success": 1.0 if total_reward > 0 else 0.0,
+                    "mwpm_success": 0.0,
+                    "logical_error_rate": 0.0,
+                    "effective_p": float(info.get("p", 0.001)),
+                    "policy_loss": 0.0,
+                    "value_loss": 0.0,
+                }
+                self._push(MetricEvent(metric))
+                if self._on_metric:
+                    self._on_metric(metric)
+
+            self._push(DoneEvent(self.episodes))
+
+        except Exception as exc:
+            self._push(ErrorEvent(str(exc)))

@@ -1,0 +1,29 @@
+# Core QEC dependencies for syndrome-net
+stim>=1.12
+pymatching>=2.0
+numpy>=1.24
+scipy>=1.10
+
+# Colour code libraries
+el-loom>=0.4.0
+color-code-stim>=1.1.0
+
+# Math / algebra
+galois>=0.4.0
+
+# RL / ML
+torch>=2.0
+gymnasium>=0.29
+flash_attn>=2.5
+
+# Visualization
+plotly>=5.15
+streamlit>=1.30
+matplotlib>=3.7
+
+# Research integration
+feedparser>=6.0
+
+# Testing
+pytest>=7.0
+ruff>=0.1.0

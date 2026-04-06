@@ -97,6 +97,8 @@ class DIContainer:
             WalkingCodeBuilder,
             ISwapCodeBuilder,
             XYZ2HexagonalBuilder,
+            ColorCodeStimBuilder,
+            LoomColorCodeBuilder,
         )
         from syndrome_net.decoders import MWPMDecoder, UnionFindDecoder
         from syndrome_net.noise import IIDDepolarizingModel, BiasedNoiseModel
@@ -108,6 +110,16 @@ class DIContainer:
         self._circuit_builders.register("walking", WalkingCodeBuilder())
         self._circuit_builders.register("iswap", ISwapCodeBuilder())
         self._circuit_builders.register("xyz2", XYZ2HexagonalBuilder())
+        
+        # Colour code builders (graceful if deps missing)
+        try:
+            self._circuit_builders.register("color_code", ColorCodeStimBuilder())
+        except Exception:  # color-code-stim not installed
+            pass
+        try:
+            self._circuit_builders.register("loom_color_code", LoomColorCodeBuilder())
+        except Exception:  # el-loom not installed
+            pass
         
         # Decoders
         self._decoders.register("mwpm", MWPMDecoder())

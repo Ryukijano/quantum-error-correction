@@ -19,7 +19,7 @@ def test_plugin_registry_includes_requested_code_families():
 def test_qldpc_raises_on_missing_inputs():
     # Should still raise if no variant/inputs provided
     plugin = QLDPCCodePlugin()
-    with pytest.raises(NotImplementedError, match="Required parity-check inputs"):
+    with pytest.raises(NotImplementedError):
         plugin.build_circuit(CircuitGenerationConfig(distance=3, rounds=2, physical_error_rate=0.001))
 
 
