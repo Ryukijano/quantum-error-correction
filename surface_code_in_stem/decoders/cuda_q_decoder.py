@@ -7,7 +7,7 @@ backend acceleration and robust fallback into deterministic parity-matrix logic.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 import numpy as np
@@ -336,7 +336,7 @@ class CudaQDecoder(DecoderProtocol):
     name: str = "cudaq"
     device: str = "cuda"
     degraded: bool = False
-    decoder: UnionFindDecoder = UnionFindDecoder()
+    decoder: UnionFindDecoder = field(default_factory=UnionFindDecoder)
 
     def decode(self, detector_events: BoolArray, metadata: DecoderMetadata) -> DecoderOutput:
         output, diagnostics = _decode_with_backend_or_fallback(
@@ -360,7 +360,7 @@ class CuQNNBackendAdapterDecoder(DecoderProtocol):
     name: str = "cuqnn"
     device: str = "cuda"
     degraded: bool = False
-    decoder: UnionFindDecoder = UnionFindDecoder()
+    decoder: UnionFindDecoder = field(default_factory=UnionFindDecoder)
 
     def decode(self, detector_events: BoolArray, metadata: DecoderMetadata) -> DecoderOutput:
         output, diagnostics = _decode_with_backend_or_fallback(
@@ -384,7 +384,7 @@ class QuJaxNeuralBPDecoder(DecoderProtocol):
     name: str = "qujax"
     device: str = "gpu"
     degraded: bool = False
-    decoder: UnionFindDecoder = UnionFindDecoder()
+    decoder: UnionFindDecoder = field(default_factory=UnionFindDecoder)
 
     def decode(self, detector_events: BoolArray, metadata: DecoderMetadata) -> DecoderOutput:
         output, diagnostics = _decode_with_backend_or_fallback(

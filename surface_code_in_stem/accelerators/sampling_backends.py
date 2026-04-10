@@ -126,6 +126,26 @@ def _candidate_order(
     return ordered
 
 
+def _apply_stim_fallback_metadata(
+    metadata: SamplingBackendMetadata,
+    *,
+    trace_chain: list[str],
+    use_accelerated: bool,
+    last_reason: str | None,
+    final_fallback: bool,
+) -> None:
+    if not trace_chain:
+        return
+    if final_fallback:
+        metadata.trace_tokens = _build_backend_chain("stim", trace_chain)
+    else:
+        metadata.trace_tokens = _build_backend_chain("stim", trace_chain)
+    if not use_accelerated and all(token.endswith("_unavailable") for token in trace_chain):
+        metadata.fallback_reason = "all candidates unavailable"
+    elif last_reason is not None:
+        metadata.fallback_reason = last_reason
+
+
 def _normalize_backend_version(module: Any, default: str) -> str:
     try:
         return str(getattr(module, "__version__", default))
@@ -148,6 +168,7 @@ class _StimSamplingBackend:
         self._circuit = circuit
         self._seed = seed
         self._details = dict(details or {})
+        self._sampler: Any | None = None
         self.last_sample_us = 0.0
         self.sample_rate = 0.0
         self.metadata = SamplingBackendMetadata(
@@ -160,10 +181,17 @@ class _StimSamplingBackend:
             sample_trace_id=self._details.get("sample_trace_id"),
         )
 
+    def _get_sampler(self) -> Any:
+        if self._sampler is None:
+            self._sampler = self._circuit.compile_detector_sampler(seed=self._seed)
+        return self._sampler
+
     def sample(self) -> tuple[np.ndarray, np.ndarray]:
         start = time.perf_counter_ns()
         try:
-            result = _sample_stim(self._circuit, self._seed)
+            sampler = self._get_sampler()
+            det_samples_bool, obs_samples = sampler.sample(1, separate_observables=True)
+            result = det_samples_bool[0].astype(np.int8), obs_samples[0].astype(np.int8)
             return result
         finally:
             self.last_sample_us = (time.perf_counter_ns() - start) / 1_000.0
@@ -215,7 +243,7 @@ class _QhybridSamplingBackend:
             self.metadata.fallback_reason = f"qhybrid sample path failed: {exc}"
             self.metadata.backend_enabled = False
             self.metadata.trace_tokens = self.metadata.trace_tokens + _trace_token("qhybrid_fallback")
-            return _sample_stim(self._circuit, self._seed)
+            return self._fallback.sample()
         finally:
             self.last_sample_us = (time.perf_counter_ns() - start) / 1_000.0
             if self.last_sample_us > 0:
@@ -256,7 +284,7 @@ class _CuQuantumSamplingBackend:
             self.metadata.fallback_reason = f"cuquantum sample path failed: {exc}"
             self.metadata.backend_enabled = False
             self.metadata.trace_tokens = self.metadata.trace_tokens + _trace_token("cuquantum_fallback")
-            return _sample_stim(self._circuit, self._seed)
+            return self._fallback.sample()
         finally:
             self.last_sample_us = (time.perf_counter_ns() - start) / 1_000.0
             if self.last_sample_us > 0:
@@ -297,7 +325,7 @@ class _QuJaxSamplingBackend:
             self.metadata.fallback_reason = f"qujax sample path failed: {exc}"
             self.metadata.backend_enabled = False
             self.metadata.trace_tokens = self.metadata.trace_tokens + _trace_token("qujax_fallback")
-            return _sample_stim(self._circuit, self._seed)
+            return self._fallback.sample()
         finally:
             self.last_sample_us = (time.perf_counter_ns() - start) / 1_000.0
             if self.last_sample_us > 0:
@@ -338,7 +366,7 @@ class _CudaQSamplingBackend:
             self.metadata.fallback_reason = f"cudaq sample path failed: {exc}"
             self.metadata.backend_enabled = False
             self.metadata.trace_tokens = self.metadata.trace_tokens + _trace_token("cudaq_fallback")
-            return _sample_stim(self._circuit, self._seed)
+            return self._fallback.sample()
         finally:
             self.last_sample_us = (time.perf_counter_ns() - start) / 1_000.0
             if self.last_sample_us > 0:
@@ -441,12 +469,13 @@ def build_sampling_backend(
 
         if candidate == "stim":
             selected = _StimSamplingBackend(circuit, seed, details=details)
-            if trace_chain:
-                selected.metadata.trace_tokens = _build_backend_chain("stim", trace_chain)
-                if (not use_accelerated and all(token.endswith("_unavailable") for token in trace_chain)):
-                    selected.metadata.fallback_reason = "all candidates unavailable"
-                else:
-                    selected.metadata.fallback_reason = last_reason
+            _apply_stim_fallback_metadata(
+                selected.metadata,
+                trace_chain=trace_chain,
+                use_accelerated=use_accelerated,
+                last_reason=last_reason,
+                final_fallback=False,
+            )
             return selected
 
         if candidate == "qhybrid":
@@ -505,7 +534,7 @@ def build_sampling_backend(
                 last_reason = f"cudaq sample path failed: {exc}"
                 continue
 
-    return _StimSamplingBackend(
+    final_backend = _StimSamplingBackend(
         circuit,
         seed,
         details={
@@ -516,3 +545,11 @@ def build_sampling_backend(
             "protocol_metadata": protocol_metadata,
         },
     )
+    _apply_stim_fallback_metadata(
+        final_backend.metadata,
+        trace_chain=trace_chain,
+        use_accelerated=use_accelerated,
+        last_reason=last_reason,
+        final_fallback=True,
+    )
+    return final_backend

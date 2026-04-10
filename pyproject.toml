@@ -18,6 +18,12 @@ dependencies = [
   "streamlit>=1.28",
   "plotly",
   "pymatching>=2.1",
+  "pandas",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "maturin", "qhybrid-kernels"]
+accelerated = [
   "cudaq",
   "cuquantum",
   "el-loom",
@@ -26,11 +32,8 @@ dependencies = [
   "qujax",
 ]
 
-[project.optional-dependencies]
-dev = ["pytest", "maturin", "qhybrid-kernels"]
-
 [tool.setuptools]
-packages = ["surface_code_in_stem", "codes", "app"]
+packages = ["syndrome_net", "surface_code_in_stem", "codes", "app"]
 include-package-data = true
 
 [project.entry-points."syndrome_net.decoders"]

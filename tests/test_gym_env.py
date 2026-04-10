@@ -4,7 +4,7 @@ import pytest
 import numpy as np
 from typing import Any
 
-pytest.importorskip("gym")
+pytest.importorskip("gymnasium")
 stim = pytest.importorskip("stim")
 
 from surface_code_in_stem.rl_control.gym_env import QECGymEnv, QECContinuousControlEnv
