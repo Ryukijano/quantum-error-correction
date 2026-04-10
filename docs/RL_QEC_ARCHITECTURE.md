@@ -129,3 +129,76 @@ sequenceDiagram
         end
     end
 ```
+
+## 5. RL loop modes in practice
+
+`app/streamlit_app.py` and `scripts/train_sota_rl.py` share the same strategy
+interface for PPO/SAC and emit the same queue-event contract.
+The app surface also exposes `pepg` for interactive experiments while script mode
+supports `ppo`, `sac`, and `all`.
+
+- `ppo`: one-shot decoding policy on `QECGymEnv`/`ColourCodeGymEnv` with `QECGymEnvBuilder`
+- `sac`: continuous calibration policy on `QECContinuousControlEnv`/`ColourCodeCalibrationEnv` with `QECContinuousControlEnvBuilder`
+- `pepg`: evolutionary-style continuous tuning loop for control parameters with no explicit replay-buffer requirement
+
+All strategies route through `app/rl_runner.py` event objects (`MetricEvent`,
+`SyndromeEvent`, `DoneEvent`, `ErrorEvent`) and are surfaced through
+`app/rl_services.py` history normalization.
+
+For advanced RL settings in the UI:
+
+- Curriculum learning gates episode-level difficulty controls on distance and error rate schedules.
+- Early stopping settings control reward/success plateau detection windows.
+- PPO/SAC/PEPG-specific hyperparameters are passed through directly to their strategy implementations.
+
+## 6. Sampling backend and contract metadata fields
+
+The UI sampling controls and benchmark scripts both expose backend observability in metadata:
+
+- `backend_id`: active backend that resolved sampling for a run (`stim`, `qhybrid`, `cuquantum`, `qujax`, `cudaq`)
+- `backend_enabled`: whether the resolved backend could be loaded
+- `backend_version`: backend package/version string when available
+- `sample_us`: per-call or rolling sample latency in microseconds
+- `sample_rate`: empirical sampling rate derived from successful calls
+- `sample_trace_id`: short trace identifier for a contiguous sample run
+- `trace_tokens`: optional run-level tags from UI input and runtime
+- `backend_chain`: resolved backend fallback path used by the probe
+- `contract_flags`: explicit reason flags such as `backend_enabled,contract_met` or `backend_disabled,contract_fallback`
+- `profiler_flags`: optional profile diagnostics like `sample_trace_present` or `trace_chain_recorded`
+- `fallback_reason`: populated if backend selection failed and fallback occurred
+- `backend_chain_tokens`: ordered list of attempted backends for provenance
+- `details`: free-form environment info payload for extra diagnostics
+
+Documenting these fields consistently across scripts and dashboards makes benchmark
+diffing and CI reproducibility checks reliable across machines and runner modes.
+
+## 7. Backend contract schemas
+
+Use a single vocabulary across all code paths to avoid drift:
+
+- `backend_id`: resolved backend for a sample call.
+- `backend_enabled`: whether the selected backend could initialize.
+- `backend_version`: backend package/module version string.
+- `backend_chain`: fallback chain summary.
+- `backend_chain_tokens`: ordered tokens for each attempted/selected backend.
+- `contract_flags`: reason/status flags used by CI checks.
+- `profiler_flags`: trace coverage and telemetry flags.
+- `fallback_reason`: populated when fallback to a slower path occurred.
+- `sample_trace_id`, `trace_tokens`, `sample_us`, `sample_rate`: run-level diagnostics.
+
+Runtime and benchmark artifacts should include these keys even when values are empty/falsey so parser behavior stays schema-stable.
+
+## 8. Merge pathway for `quantumforge` and acceleration stack
+
+For a controlled merge between this repo and `quantumforge`:
+
+- keep `quantumforge/` in the working tree as the accelerator implementation source.
+- preserve public interfaces used by `surface_code_in_stem/accelerators/*`.
+- update only lockfiles and accelerator interface modules when synchronizing upstream `quantumforge`.
+- run contract-focused tests and compare backend metadata traces after sync:
+  - `tests/test_sampling_backend_contracts.py`
+  - `tests/test_benchmark_decoder_contracts.py`
+  - `tests/test_cuda_q_decoder.py`
+  - `scripts/bench_runtime_contracts.py`
+
+For a step-by-step command playbook, see `../docs/REPO_MERGE_AND_DEPLOYMENT.md`.

@@ -60,26 +60,52 @@ The demo app includes:
 
 Python 3.10+ is recommended.
 
+### Recommended lock-based install (deterministic)
+
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.lock
 ```
 
-For full colour code support:
+### Full QEC + colour-code stack
 
 ```bash
+pip install -r requirements.lock
 pip install -r requirements-qec.txt
 ```
 
 This installs `color-code-stim`, `el-loom`, and `galois` for colour code circuits and concatenated MWPM decoding.
 
-Minimal install for RL/Gym experiments:
+### Streamlit UI-only stack
 
 ```bash
-pip install stim gym numpy torch pytest
+pip install -r app/requirements.lock
 ```
 
-## Quickstart
+Use this for app-only experiments where CLI benchmark workflows are not required.
 
+## CUDA and accelerated backends
+
+Accelerated sampling backends are optional and discovered at runtime.
+
+- `qhybrid` (`qhybrid_kernels`) — backend probe is exposed through `qhybrid_backend.probe_capability()`
+- `cuquantum` (`tensornet`)
+- `qujax` (`jax`)
+- `cudaq`
+
+Runtime fallback behavior is explicit and instrumented:
+
+- Automatic mode tries candidates in order: `qhybrid -> cuquantum -> qujax -> cudaq -> stim`
+- Explicit mode (eg. `sampling_backend="stim"`) pins backend selection
+- Any failure in a candidate backend falls back to the next candidate (or to `stim`)
+- Every emitted metric row carries backend metadata (`backend_id`, `backend_chain`, `contract_flags`, `profiler_flags`) so users can verify whether acceleration was used
+
+Install matrix guidance:
+
+- Start with `requirements.lock` for baseline reproducible behavior.
+- Add optional GPU/runtime dependencies from your platform guide only when enabled in your workflow.
+- For CI-like parity, prefer pinned files (`requirements.lock` + `app/requirements.lock`) and keep optional packages optional.
+
+## Quickstart
 ### 1) Generate a surface-code circuit
 
 ```python
@@ -145,6 +171,84 @@ python3 -m pytest tests/test_qldpc_parity.py
 python3 -m pytest tests/test_colour_codes.py  # Colour code tests
 python3 -m pytest tests/test_circuit_determinism.py  # Includes colour code determinism
 ```
+
+## Backend and benchmark contract checks
+
+Use these commands to validate backend metadata contracts before sharing artifacts or opening a PR:
+
+```bash
+python3 -m pytest \
+  tests/test_sampling_backend_contracts.py \
+  tests/test_benchmark_decoder_contracts.py \
+  tests/test_math_validity_helpers.py \
+  tests/test_architectural_registries.py \
+  tests/test_runtime_contracts.py \
+  tests/test_cuda_q_decoder.py
+python3 scripts/bench_runtime_contracts.py --output artifacts/benchmarks/runtime.json
+python3 scripts/benchmark_decoders.py --quick --sampling-backends sweep --suite circuit --seed 11 --output-dir artifacts/benchmarks
+```
+
+## Running benchmark and Streamlit metadata exports
+
+Both the runtime path and benchmark scripts emit backend observability keys that are used by CI and for long-running experiment diffing:
+
+- `backend_id`
+- `backend_enabled`
+- `backend_chain`
+- `backend_chain_tokens`
+- `backend_version`
+- `contract_flags`
+- `profiler_flags`
+- `trace_tokens`
+- `sample_trace_id`
+- `fallback_reason`
+- `sample_us`
+- `sample_rate`
+
+Use this schema consistently when merging new profiling surfaces.
+
+## Repo merge and repo topology playbook
+
+Current layout intentionally keeps `quantumforge` as an internal dependency directory within this repository, so CI and app code can import optional accelerated kernels without an extra git dependency at runtime.
+
+Recommended workflow for repo-style evolution:
+
+1. Keep `quantumforge/` as the local source-of-truth for Rust/PyO3 acceleration code.
+2. When `quantumforge` changes upstream:
+   - pull or rebase that component into the vendored directory.
+   - run `python3 -m pytest tests/test_*` and at least one `scripts/benchmark_decoders.py --quick ...` smoke sweep.
+   - validate `git diff` only touches intended directories.
+3. For an explicit split-repository topology:
+   - keep `quantumforge` in its own git history.
+   - mirror a release window by syncing via `git subtree` or periodic snapshot copy into `syndrome-net/quantumforge`.
+   - use a shared lockfile strategy to avoid dependency drift (see `requirements.lock` and `quantumforge/python/requirements.lock`).
+
+See `docs/REPO_MERGE_AND_DEPLOYMENT.md` for a concrete command sequence and recovery checks.
+
+## Benchmarking contract fields
+
+`scripts/benchmark_decoders.py` writes both CSV and JSON rows with explicit backend-trace metadata.
+Each row includes:
+
+- `domain`: benchmark family (`circuit` or `qldpc`)
+- `family`: code family name (eg. `surface`, `xyz2`)
+- `decoder`: decoder identifier
+- `distance`
+- `physical_error_rate`
+- `shots`
+- `metric_name`
+- `metric_value`
+- `backend`
+- `backend_enabled`: backend availability/fallback status
+- `backend_version`
+- `fallback_reason`
+- `sample_trace_id`
+- `backend_chain`
+- `backend_chain_tokens`
+- `contract_flags`: e.g. `backend_enabled,contract_met` or `backend_disabled,contract_fallback`
+- `profiler_flags`: e.g. `sample_trace_present,trace_chain_recorded`
+
+Use the `--sampling-backends` flag with one or more values (`stim`, `qhybrid`, `cuquantum`, `qujax`, `cudaq`) or sweep aliases (`all`, `sweep`, `all_backends`, `*`) to capture comparable backend metadata in each backend mode.
 
 ## High-Level Architecture
 
@@ -233,5 +337,5 @@ The implementation includes:
 
 ## Notes
 
-- Current RL environments are implemented with `gym`; if desired, migration to `gymnasium` is straightforward.
-- `QECGymEnv` is currently a one-step episode formulation for decoding, which is ideal for policy learning over syndrome-to-logical mapping and baseline comparison against MWPM.
+- RL environments are implemented with `gymnasium`-compatible wrappers and `gym` compatibility paths.
+- `QECGymEnv` is currently a one-step episode formulation for decoding, ideal for policy learning over syndrome-to-logical mapping and baseline comparison against MWPM.

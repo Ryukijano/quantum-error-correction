@@ -32,9 +32,29 @@ policy.
   - SAC history: `sac_history.json`
   - Plotter: `scripts/plot_training_curves.py`
 
-- **Resource footprint**
-  - Script: `scripts/teraquop_footprint.py`
-  - Metric: estimated physical-qubit overhead for a target logical error rate
+### RL loop modes
+
+The Streamlit UI and `scripts/train_sota_rl.py` share the same `RLTrainingStrategy`
+implementations for PPO/SAC. The app adds an additional `pepg` pathway for
+interactive tuning sessions; the script currently exposes `--mode ppo | sac | all`.
+
+- `ppo` (and colour-code variants):
+  - Environment: one-shot decoding (`QECGymEnv`, `ColourCodeGymEnv`)
+  - Purpose: policy learning from syndrome payloads
+  - Key runtime metrics: `policy_loss`, `value_loss`, `alpha_loss`, `learning_steps`, `policy_updates`, `rl_success_iqm`
+- `sac` (and colour-code variants):
+  - Environment: continuous calibration (`QECContinuousControlEnv`, `ColourCodeCalibrationEnv`, `QECCodeDiscoveryEnv`)
+  - Purpose: continuous control over calibration and code-parameter schedules
+  - Key runtime metrics: `policy_loss`, `value_loss`, `alpha_loss`, `alpha`, `policy_updates`, `rl_success_iqm`, `ler_ci`
+- `pepg` (and colour-code variants):
+  - Environment: continuous parameter optimization path
+  - Purpose: evolutionary-style optimization loop for policy-free sweeps
+  - Key runtime metrics: `policy_updates`, `grad_norm`, `rl_success_iqm`
+
+### Resource footprint
+
+- Script: `scripts/teraquop_footprint.py`
+- Metric: estimated physical-qubit overhead for a target logical error rate
 
 ## Recommended Quick / Production Modes
 
@@ -56,6 +76,62 @@ policy.
 3. Run `scripts/train_sota_rl.py --mode all --episodes 200` and then
    `scripts/plot_training_curves.py --quick`.
 4. Run the full sweeps for final figures and save the outputs as PDF + PNG.
+
+## Benchmark and runtime contract fields
+
+Both benchmark and runtime collectors should preserve metadata used by CI:
+
+- Decoder benchmark rows (`scripts/benchmark_decoders.py`):
+  - `backend`, `backend_enabled`, `backend_version`, `fallback_reason`
+  - `sample_trace_id`, `backend_chain`, `backend_chain_tokens`
+  - `contract_flags`, `profiler_flags`
+- Runtime stream rows (`scripts/bench_runtime_contracts.py` and Streamlit training events):
+  - `backend_id`, `backend_enabled`, `sample_us`, `backend_version`, `sample_rate`
+  - `trace_tokens`, `backend_chain`, `contract_flags`, `profiler_flags`
+  - `sample_trace_id`, `fallback_reason`, `details`, `ler_ci`
+
+If one or more fields are missing, downstream parsers should fail fast in benchmark CI checks.
+
+## Merge-aware experiment flow
+
+Before sharing or shipping runs across repos, keep this sequence:
+
+1. Sync `quantumforge` accelerator source and lockfiles if updated.
+2. Run minimal contract checks for sampler and benchmarking paths:
+
+```bash
+python3 -m pytest \
+  tests/test_sampling_backend_contracts.py \
+  tests/test_benchmark_decoder_contracts.py \
+  tests/test_cuda_q_decoder.py \
+  tests/test_runtime_contracts.py
+```
+
+3. Run a smoke benchmark output on your intended target matrix:
+
+```bash
+python3 scripts/benchmark_decoders.py --quick --sampling-backends stim --suite circuit --output-dir artifacts/benchmarks
+```
+
+4. If any fallback/contract flags changed, include a short note in the experiment report and rerun the same command with the new suite arguments.
+
+This flow prevents silent drift when two repositories evolve at different rates.
+
+## Canonical benchmark artifact checklist
+
+For each result row (CSV or JSON), preserve:
+
+- `backend`
+- `backend_enabled`
+- `backend_version`
+- `backend_chain`
+- `backend_chain_tokens`
+- `contract_flags`
+- `profiler_flags`
+- `fallback_reason`
+- `sample_trace_id`
+
+These fields are intentionally tracked even for non-accelerated fallback runs.
 
 ## Figure Quality Standard
 
