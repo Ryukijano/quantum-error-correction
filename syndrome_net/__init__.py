@@ -268,3 +268,29 @@ class InvalidSpecError(SyndromeNetError):
         super().__init__(f"Invalid circuit spec {spec}: {reason}")
         self.spec = spec
         self.reason = reason
+
+
+def get_container():
+    """Return the global DI container."""
+    from syndrome_net.container import get_container as _get_container
+
+    return _get_container()
+
+
+def set_container(container):
+    """Override the global DI container."""
+    from syndrome_net.container import set_container as _set_container
+
+    return _set_container(container)
+
+
+def reset_container() -> None:
+    """Reset the global DI container."""
+    from syndrome_net.container import reset_container as _reset_container
+
+    _reset_container()
+
+
+def get_default_container():
+    """Backward-compatible alias for :func:`get_container`."""
+    return get_container()

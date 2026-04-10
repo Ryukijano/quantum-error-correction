@@ -14,10 +14,12 @@ Mathematical formulation:
 
 from __future__ import annotations
 
+from dataclasses import asdict
+from dataclasses import dataclass
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Protocol, Tuple
 
 try:
     import stim
@@ -26,7 +28,13 @@ except ImportError:
     HAS_STIM = False
 
 from surface_code_in_stem.surface_code import surface_code_circuit_string
-from surface_code_in_stem.decoders import MWPMDecoder, DecoderMetadata
+from surface_code_in_stem.decoders import MWPMDecoder, DecoderMetadata, DecoderProtocol
+from surface_code_in_stem.accelerators.sampling_backends import SamplingBackend, build_sampling_backend
+
+try:
+    from surface_code_in_stem.accelerators import qhybrid_backend
+except Exception:
+    qhybrid_backend = None
 
 
 class QECGymEnv(gym.Env):
@@ -50,7 +58,13 @@ class QECGymEnv(gym.Env):
         physical_error_rate: float = 0.001,
         seed: Optional[int] = None,
         use_mwpm_baseline: bool = True,
-        use_soft_information: bool = False
+        use_soft_information: bool = False,
+        use_accelerated_sampling: bool = False,
+        sampling_backend: str | None = None,
+        protocol_metadata: dict[str, Any] | None = None,
+        enable_profile_traces: bool = False,
+        benchmark_probe_token: str | None = None,
+        decoder_name: str | None = None,
     ):
         """Initialize the QEC Gym Environment.
         
@@ -72,6 +86,12 @@ class QECGymEnv(gym.Env):
         self.p = physical_error_rate
         self.use_mwpm_baseline = use_mwpm_baseline
         self.use_soft_information = use_soft_information
+        self.use_accelerated_sampling = use_accelerated_sampling
+        self.sampling_backend = sampling_backend
+        self.enable_profile_traces = enable_profile_traces
+        self.benchmark_probe_token = benchmark_probe_token
+        self.protocol_metadata = dict(protocol_metadata or {})
+        self._decoder_name = decoder_name
         
         # Set up random number generator
         self._rng = np.random.default_rng(seed)
@@ -95,14 +115,22 @@ class QECGymEnv(gym.Env):
         self._current_syndrome: Optional[np.ndarray] = None
         self._current_logical: Optional[np.ndarray] = None
         
-        # Optional MWPM baseline for comparison
+        # Optional decoder baseline for comparison.
+        # Historically this was MWPM-only; we now keep MWPM as default while
+        # allowing a container-resolved decoder for diagnostics/experiments.
+        # Any lookup failures fall back to MWPM while still emitting metadata.
         if self.use_mwpm_baseline:
-            self._mwpm_decoder = MWPMDecoder()
+            self._mwpm_decoder = self._resolve_baseline_decoder(self._decoder_name)
+            self._baseline_decoder_name = self._mwpm_decoder.name
             self._decoder_metadata = DecoderMetadata(
                 num_observables=self.num_observables,
                 detector_error_model=self.circuit.detector_error_model(decompose_errors=True),
                 circuit=self.circuit,
-                seed=self._seed_val
+                seed=self._seed_val,
+                extra={
+                    "baseline_decoder": self._baseline_decoder_name,
+                    "decoder_requested": self._decoder_name,
+                },
             )
 
     def _build_circuit(self) -> None:
@@ -115,7 +143,30 @@ class QECGymEnv(gym.Env):
         self.circuit = stim.Circuit(circuit_str)
         self.num_detectors = self.circuit.num_detectors
         self.num_observables = self.circuit.num_observables
-        self.sampler = self.circuit.compile_detector_sampler(seed=self._seed_val)
+        self.sampler = self._build_sampler_backend(seed=int(self._seed_val))
+
+    def _build_sampler_backend(self, seed: int) -> SamplingBackend:
+        protocol_metadata = dict(self.protocol_metadata)
+        protocol_metadata["seed"] = int(seed)
+        return build_sampling_backend(
+            self.circuit,
+            seed=seed,
+            use_accelerated=bool(self.use_accelerated_sampling),
+            backend_override=self.sampling_backend,
+            backend_preference=protocol_metadata.get("sampling_backend"),
+            protocol_metadata=protocol_metadata,
+            sample_trace_id=self.benchmark_probe_token,
+        )
+
+    def _resolve_baseline_decoder(self, decoder_name: str | None) -> DecoderProtocol:
+        if not decoder_name:
+            return MWPMDecoder()
+        try:
+            from syndrome_net.container import get_container
+            container = get_container()
+            return container.get_decoder(decoder_name)
+        except Exception:
+            return MWPMDecoder()
 
     def reset(
         self,
@@ -132,13 +183,13 @@ class QECGymEnv(gym.Env):
         super().reset(seed=seed)
         if seed is not None:
             self._seed_val = seed
-            self.sampler = self.circuit.compile_detector_sampler(seed=seed)
+            self.sampler = self._build_sampler_backend(seed=int(seed))
             
         # Sample one shot
-        det_samples_bool, obs_samples = self.sampler.sample(1, separate_observables=True)
+        det_samples_bool, obs_samples = self.sampler.sample()
         
-        det_samples = det_samples_bool[0].astype(np.int8)
-        self._current_logical = obs_samples[0].astype(np.int8)
+        det_samples = det_samples_bool.astype(np.int8)
+        self._current_logical = obs_samples.astype(np.int8)
         
         if self.use_soft_information:
             # Simulate analog soft information: true defects are closer to 1, others to 0
@@ -148,20 +199,39 @@ class QECGymEnv(gym.Env):
         else:
             self._current_syndrome = det_samples
         
-        info = {}
+        info: dict[str, Any] = {}
         
         # Provide MWPM baseline if requested
         if self.use_mwpm_baseline:
+            info["baseline_decoder"] = str(self._baseline_decoder_name)
+            info["baseline_decoder_requested"] = self._decoder_name
             # Need 2D array for decoder input
-            events = np.array([det_samples_bool[0]], dtype=np.bool_)
-            decoded = self._mwpm_decoder.decode(events, self._decoder_metadata)
-            mwpm_pred = decoded.logical_predictions[0].astype(np.int8)
+            events = np.array([det_samples], dtype=np.bool_)
+            try:
+                decoded = self._mwpm_decoder.decode(events, self._decoder_metadata)
+                mwpm_pred = decoded.logical_predictions[0].astype(np.int8)
+            except Exception as exc:
+                mwpm_pred = np.zeros_like(self._current_logical, dtype=np.int8)
+                info["mwpm_decode_error"] = str(exc)
             mwpm_correct = np.all(mwpm_pred == self._current_logical)
             info["mwpm_prediction"] = mwpm_pred
             info["mwpm_correct"] = mwpm_correct
             
         # Save binary syndrome for info
         info["binary_syndrome"] = det_samples
+        backend_metadata = getattr(self.sampler, "metadata", None)
+        if backend_metadata is not None:
+            if self.enable_profile_traces:
+                info["sampling_backend"] = asdict(backend_metadata)
+            else:
+                info["sampling_backend"] = {
+                    "backend_id": backend_metadata.backend_id,
+                    "backend_enabled": backend_metadata.backend_enabled,
+                    "fallback_reason": backend_metadata.fallback_reason,
+                    "sample_rate": backend_metadata.sample_rate,
+                    "trace_tokens": backend_metadata.trace_tokens,
+                }
+            info["sample_us"] = float(self.sampler.last_sample_us)
             
         return self._current_syndrome, info
 

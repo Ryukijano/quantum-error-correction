@@ -97,6 +97,7 @@ class PPOAgent:
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_ratio: float = 0.2,
+        max_grad_norm: float = 0.5,
         value_coef: float = 0.5,
         entropy_coef: float = 0.01,
         ppo_epochs: int = 4,
@@ -109,6 +110,7 @@ class PPOAgent:
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
         self.ppo_epochs = ppo_epochs
+        self.max_grad_norm = float(max_grad_norm)
         
         self.network = TransformerPPOActorCritic(state_dim, action_dim).to(self.device)
         self.optimizer = optim.Adam(self.network.parameters(), lr=lr, eps=1e-5)
@@ -173,7 +175,8 @@ class PPOAgent:
             # Backprop
             self.optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), 0.5)
+            if self.max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), float(self.max_grad_norm))
             self.optimizer.step()
             
             total_policy_loss += policy_loss.item()
@@ -395,6 +398,7 @@ class ContinuousSACAgent:
         tau: float = 0.005,
         alpha: float = 0.2,
         lr: float = 3e-4,
+        max_grad_norm: float = 1.0,
         hidden_dim: int = 256,
         use_diffusion: bool = False,
         device: str = "cpu"
@@ -403,6 +407,7 @@ class ContinuousSACAgent:
         self.tau = tau
         self.alpha = alpha
         self.device = torch.device(device)
+        self.max_grad_norm = float(max_grad_norm)
 
         self.critic = SACQNetwork(state_dim, action_dim, hidden_dim).to(device)
         self.critic_target = copy.deepcopy(self.critic)
@@ -457,6 +462,8 @@ class ContinuousSACAgent:
 
         self.critic_optim.zero_grad()
         qf_loss.backward()
+        if self.max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), float(self.max_grad_norm))
         self.critic_optim.step()
 
         # Actor update
@@ -471,6 +478,8 @@ class ContinuousSACAgent:
 
         self.policy_optim.zero_grad()
         policy_loss.backward()
+        if self.max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), float(self.max_grad_norm))
         self.policy_optim.step()
 
         # Alpha update (Automatic Entropy Tuning)

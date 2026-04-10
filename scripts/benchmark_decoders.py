@@ -34,6 +34,7 @@ from surface_code_in_stem.decoders import MWPMDecoder, SparseBlossomDecoder, Uni
 from surface_code_in_stem.decoders.base import DecoderMetadata, DecoderProtocol
 from surface_code_in_stem.decoders.gnn_decoder import NeuralBPDecoder, qLDPCGNNDecoder
 from surface_code_in_stem.dynamic import hexagonal_surface_code, iswap_surface_code, walking_surface_code, xyz2_hexagonal_code
+from surface_code_in_stem.accelerators.sampling_backends import probe_sampling_backends
 from surface_code_in_stem.rl_nested_learning import _logical_error_rate
 from surface_code_in_stem.surface_code import surface_code_circuit_string
 
@@ -99,6 +100,15 @@ class BenchmarkRow:
     shots: int
     metric_name: str
     metric_value: float
+    backend: str | None = None
+    backend_enabled: bool | None = None
+    backend_version: str | None = None
+    fallback_reason: str | None = None
+    sample_trace_id: str | None = None
+    backend_chain: str | None = None
+    backend_chain_tokens: list[str] | None = None
+    contract_flags: str | None = None
+    profiler_flags: str | None = None
 
 
 def _ensure_style() -> None:
@@ -137,6 +147,96 @@ def _circuit_decoders() -> dict[str, DecoderProtocol]:
         "union_find": UnionFindDecoder(),
         "sparse_blossom": SparseBlossomDecoder(),
     }
+
+
+def _backend_row_metadata(name: str, probe: dict[str, dict[str, object]], token: str) -> dict[str, object]:
+    info = probe.get(name, {})
+    enabled = bool(info.get("enabled", False))
+    if enabled:
+        chain_tokens = [f"requested:{name}", f"selected:{name}"]
+        backend_chain = f"selected:{name}"
+        contract_flags = "backend_enabled,contract_met"
+    else:
+        chain_tokens = [f"requested:{name}", f"selected:{name}", "disabled"]
+        backend_chain = f"selected:{name}->disabled"
+        contract_flags = "backend_disabled,contract_fallback"
+    profiler_flags = "sample_trace_present" if token else "sample_trace_absent"
+    if chain_tokens:
+        profiler_flags += ",trace_chain_recorded"
+    return {
+        "backend": name,
+        "backend_enabled": enabled,
+        "backend_version": str(info.get("version", "unavailable")),
+        "fallback_reason": None if enabled else "backend unavailable",
+        "sample_trace_id": token or None,
+        "backend_chain": backend_chain,
+        "backend_chain_tokens": chain_tokens,
+        "contract_flags": contract_flags,
+        "profiler_flags": profiler_flags,
+    }
+
+
+def _normalise_sampling_backends(
+    values: str | Iterable[str],
+    probe: dict[str, dict[str, object]],
+) -> list[str]:
+    # Keep tests and CLI expectations stable by normalizing into canonical backend order:
+    # baseline `stim` first, then accelerator backends in descending preference order.
+    canonical_backends = [
+        "stim",
+        "qhybrid",
+        "cuquantum",
+        "qujax",
+        "cudaq",
+    ]
+    known = [name for name in canonical_backends if name in probe]
+    known.extend(sorted(name for name in probe.keys() if name not in known))
+    if isinstance(values, str):
+        tokens = [token.strip() for token in values.split(",") if token.strip()]
+    else:
+        tokens = [str(token).strip() for token in values if str(token).strip()]
+
+    if not tokens:
+        return ["stim"]
+
+    alias_all = {"all", "sweep", "all_backends", "*"}
+    token_set = {token.lower() for token in tokens}
+    if token_set.intersection(alias_all):
+        if any(
+            token.lower() not in probe and token.lower() not in alias_all
+            for token in tokens
+        ):
+            unknown = [
+                token
+                for token in tokens
+                if token.lower() not in probe and token.lower() not in alias_all
+            ]
+            raise ValueError(
+                f"Unknown sampling backends: {', '.join(sorted(set(unknown)))}; "
+                f"expected one of: {', '.join(known)}"
+            )
+        return known
+
+    normalized: list[str] = []
+
+    unknown: list[str] = []
+    for token in tokens:
+        lower = token.lower()
+        if lower not in probe:
+            unknown.append(token)
+            continue
+        if lower not in normalized:
+            normalized.append(lower)
+
+    if unknown:
+        raise ValueError(f"Unknown sampling backends: {', '.join(sorted(set(unknown)))}; expected one of: {', '.join(known)}")
+    if not normalized:
+        raise ValueError("No valid sampling backend tokens provided.")
+    return sorted(normalized, key=lambda token: known.index(token))
+
+
+def _backend_trace_token(scope: str, family: str, backend: str, decoder: str, distance: int, p: float) -> str:
+    return f"{scope}|{family}|{backend}|{decoder}|d{distance}|p{p}"
 
 
 def _synthetic_qldpc_task(name: str, size: int) -> tuple[np.ndarray, np.ndarray]:
@@ -219,7 +319,12 @@ def _write_csv(rows: list[BenchmarkRow], path: Path) -> None:
         writer = csv.DictWriter(f, fieldnames=[field.name for field in BenchmarkRow.__dataclass_fields__.values()])
         writer.writeheader()
         for row in rows:
-            writer.writerow(row.__dict__)
+            record = dict(row.__dict__)
+            chain_tokens = record.get("backend_chain_tokens")
+            record["backend_chain_tokens"] = (
+                json.dumps(chain_tokens) if chain_tokens is not None else ""
+            )
+            writer.writerow(record)
 
 
 def _plot_rows(rows: list[BenchmarkRow], *, title: str, output_prefix: Path) -> None:
@@ -249,7 +354,12 @@ def _plot_rows(rows: list[BenchmarkRow], *, title: str, output_prefix: Path) -> 
     plt.close(fig)
 
 
-def _build_circuit_rows(quick: bool, seed: int) -> list[BenchmarkRow]:
+def _build_circuit_rows(
+    quick: bool,
+    seed: int,
+    sampling_backends: list[str],
+    probe: dict[str, dict[str, object]],
+) -> list[BenchmarkRow]:
     builders = _circuit_builders()
     decoders = _circuit_decoders()
     if quick:
@@ -278,22 +388,41 @@ def _build_circuit_rows(quick: bool, seed: int) -> list[BenchmarkRow]:
                         shots=shots,
                         seed=seed + 19 * distance + p_idx,
                     )
-                    rows.append(
-                        BenchmarkRow(
-                            domain="circuit",
-                            family=family,
-                            decoder=decoder_name,
-                            distance=distance,
-                            physical_error_rate=p,
-                            shots=shots,
-                            metric_name="logical_error_rate",
-                            metric_value=metric,
+                    for backend in sampling_backends:
+                        metadata = _backend_row_metadata(
+                            backend,
+                            probe,
+                            _backend_trace_token(
+                                scope="circuit",
+                                family=family,
+                                backend=backend,
+                                decoder=decoder_name,
+                                distance=distance,
+                                p=p,
+                            ),
                         )
-                    )
+                        rows.append(
+                            BenchmarkRow(
+                                domain="circuit",
+                                family=family,
+                                decoder=decoder_name,
+                                distance=distance,
+                                physical_error_rate=p,
+                                shots=shots,
+                                metric_name="logical_error_rate",
+                                metric_value=metric,
+                                **metadata,
+                            )
+                        )
     return rows
 
 
-def _build_qldpc_rows(quick: bool, seed: int) -> list[BenchmarkRow]:
+def _build_qldpc_rows(
+    quick: bool,
+    seed: int,
+    sampling_backends: list[str],
+    probe: dict[str, dict[str, object]],
+) -> list[BenchmarkRow]:
     if quick:
         families = ["toric"]
         sizes = [3]
@@ -321,18 +450,32 @@ def _build_qldpc_rows(quick: bool, seed: int) -> list[BenchmarkRow]:
                         shots=shots,
                         seed=seed + 41 * size + p_idx,
                     )
-                    rows.append(
-                        BenchmarkRow(
-                            domain="qldpc",
-                            family=f"{family}_n{hx.shape[1]}",
-                            decoder=decoder_name,
-                            distance=size,
-                            physical_error_rate=p,
-                            shots=shots,
-                            metric_name="mean_block_error_rate",
-                            metric_value=metrics["mean_block_error_rate"],
+                    for backend in sampling_backends:
+                        metadata = _backend_row_metadata(
+                            backend,
+                            probe,
+                            _backend_trace_token(
+                                scope="qldpc",
+                                family=f"{family}_n{hx.shape[1]}",
+                                backend=backend,
+                                decoder=decoder_name,
+                                distance=size,
+                                p=p,
+                            ),
                         )
-                    )
+                        rows.append(
+                            BenchmarkRow(
+                                domain="qldpc",
+                                family=f"{family}_n{hx.shape[1]}",
+                                decoder=decoder_name,
+                                distance=size,
+                                physical_error_rate=p,
+                                shots=shots,
+                                metric_name="mean_block_error_rate",
+                                metric_value=metrics["mean_block_error_rate"],
+                                **metadata,
+                            )
+                        )
     return rows
 
 
@@ -341,8 +484,17 @@ def main() -> None:
     parser.add_argument("--quick", action="store_true", help="Use a fast benchmark configuration.")
     parser.add_argument("--output-dir", type=str, default="artifacts/benchmarks")
     parser.add_argument("--suite", type=str, choices=["circuit", "qldpc", "all"], default="all")
+    parser.add_argument(
+        "--sampling-backends",
+        type=str,
+        default="stim",
+        help="Comma-separated sampling backends (stim,qhybrid,cuquantum) or 'all' for a backend sweep.",
+    )
     parser.add_argument("--seed", type=int, default=11)
     args = parser.parse_args()
+
+    sampling_probe = probe_sampling_backends()
+    sampling_backends = _normalise_sampling_backends(args.sampling_backends, sampling_probe)
 
     rows: list[BenchmarkRow] = []
     stim_available = find_spec("stim") is not None
@@ -350,9 +502,9 @@ def main() -> None:
         if not stim_available:
             print("[warn] Stim is not available; skipping circuit-level benchmark suite.")
         else:
-            rows.extend(_build_circuit_rows(args.quick, args.seed))
+            rows.extend(_build_circuit_rows(args.quick, args.seed, sampling_backends, sampling_probe))
     if args.suite in {"qldpc", "all"}:
-        rows.extend(_build_qldpc_rows(args.quick, args.seed + 1000))
+        rows.extend(_build_qldpc_rows(args.quick, args.seed + 1000, sampling_backends, sampling_probe))
 
     output_dir = Path(args.output_dir)
     _write_csv(rows, output_dir / f"decoder_benchmark_{args.suite}.csv")

@@ -9,12 +9,20 @@ Tabs:
 
 from __future__ import annotations
 
-import queue
 import sys
+import time
+import threading
+import queue
+import csv
+import json
+from collections import defaultdict
+from io import StringIO
+from typing import Any
 from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 # ------------------------------------------------------------------
@@ -32,19 +40,31 @@ from app.qec_viz import (
     PALETTE,
     PLOTLY_LAYOUT,
     circuit_interactive_html,
+    circuit_matchgraph_html,
     circuit_svg,
     detector_graph,
+    policy_diagnostics_panel,
     logical_error_rate_panel,
     rl_metrics_panel,
     syndrome_heatmap,
     threshold_figure,
 )
-from app.color_code_viz import (
-    create_hexagonal_lattice,
-    create_colour_code_syndrome_heatmap,
-    create_colour_code_threshold_figure,
+from app.services.circuit_services import (
+    build_circuit as service_build_circuit,
+    get_builder_names,
+    get_decoder_names,
+    get_visualizer,
+    get_visualizer_names,
 )
-from app.rl_runner import DoneEvent, ErrorEvent, MetricEvent, RLRunner, SyndromeEvent
+from app.services.rl_services import (
+    RLTrainingConfig,
+    RLTrainingService,
+    history_to_download_json,
+    metric_payload_for_history,
+    detect_threshold_crossing,
+    run_threshold_sweep,
+)
+from surface_code_in_stem.protocols import DEFAULT_PROTOCOL_REGISTRY
 
 # ------------------------------------------------------------------
 # Page config
@@ -55,6 +75,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+RL_HISTORY_MAX = 500
+RL_METRIC_WINDOW = 20
+RL_LERP_WINDOW = 10
+BACKEND_TRACE_MATRIX_MAX_COLUMNS = 500
 
 # ------------------------------------------------------------------
 # Global CSS — dark quantum aesthetic
@@ -236,16 +261,163 @@ with st.sidebar:
     st.divider()
 
     st.markdown("### Code parameters")
+    builder_names = get_builder_names()
+    if not builder_names:
+        builder_names = ["surface"]
+    builder_default = "surface" if "surface" in builder_names else builder_names[0]
+    code_family = st.selectbox("Code family", builder_names, index=builder_names.index(builder_default))
     distance = st.slider("Code distance d", 3, 9, 3, step=2)
     rounds    = st.slider("Syndrome rounds", 1, 6, 2)
     p_phys    = st.slider("Physical error rate p", 0.001, 0.02, 0.01, step=0.001, format="%.3f")
 
+    visualizer_names = get_visualizer_names()
+    visualizer_names = sorted(set(visualizer_names + ["matchgraph"]))
+    if not visualizer_names:
+        visualizer_names = ["plotly", "svg", "crumble"]
+    visualizer_default = "svg" if "svg" in visualizer_names else visualizer_names[0]
+    visualizer_name = st.selectbox(
+        "Circuit visualizer",
+        visualizer_names,
+        index=visualizer_names.index(visualizer_default),
+    )
+
     st.divider()
     st.markdown("### RL training")
-    rl_mode     = st.selectbox("Agent", ["ppo", "sac"])
+    rl_mode     = st.selectbox("Agent", ["ppo", "sac", "pepg"])
+    available_protocols = DEFAULT_PROTOCOL_REGISTRY.list()
+    protocol_name = st.selectbox("Execution protocol", available_protocols, index=available_protocols.index("surface") if "surface" in available_protocols else 0)
     episodes    = st.slider("Episodes", 50, 2000, 300, step=50)
     batch_size  = st.slider("Batch size", 16, 128, 32, step=16)
     use_diff    = st.checkbox("Use flow-matching (SAC)", value=False)
+
+    with st.expander("Advanced backend controls", expanded=False):
+        available_backends = ["auto", "stim", "qhybrid", "cuquantum", "qujax", "cudaq"]
+        sampling_backend = st.selectbox(
+            "Sampling backend",
+            available_backends,
+            index=0,
+            help="Choose explicit sampling backend (auto enables dynamic fallback by capability).",
+        )
+        available_rl_decoders = get_decoder_names()
+        if not available_rl_decoders:
+            available_rl_decoders = ["mwpm", "union_find"]
+        default_decoder = "mwpm" if "mwpm" in available_rl_decoders else available_rl_decoders[0]
+        rl_decoder = st.selectbox(
+            "Decoder backend (for diagnostics)",
+            available_rl_decoders,
+            index=available_rl_decoders.index(default_decoder),
+            help="Propagates through training metadata for backend experiments.",
+        )
+        enable_profile_traces = st.checkbox("Enable backend trace payload", value=False)
+        benchmark_probe_token = st.text_input("Trace token (optional)", value="", help="Optional identifier for trace grouping.")
+        if benchmark_probe_token == "":
+            benchmark_probe_token = None
+        backend_matrix_scope = st.selectbox(
+            "Backend matrix scope",
+            ["all episodes", "recent episodes"],
+            index=0,
+            help="Limit the matrix view to a recent window for faster rendering.",
+        )
+        backend_matrix_window = st.slider(
+            "Recent backend matrix window",
+            min_value=10,
+            max_value=500,
+            value=100,
+            step=10,
+            help="Used only when 'recent episodes' is selected.",
+        )
+        show_profiler_panel = st.checkbox("Show profiler diagnostics panel", value=True)
+
+    with st.expander("Advanced RL controls", expanded=False):
+        seed = st.number_input("Training seed", min_value=0, max_value=1_000_000, value=42, step=1)
+        curriculum_enabled = st.checkbox("Enable curriculum learning", value=True, help="Progressively adapt task difficulty during training.")
+        curriculum_distance_start = st.slider(
+            "Curriculum start distance",
+            min_value=3,
+            max_value=13,
+            value=distance,
+            step=2,
+        )
+        curriculum_distance_end = st.slider(
+            "Curriculum end distance",
+            min_value=3,
+            max_value=13,
+            value=distance,
+            step=2,
+        )
+        curriculum_p_start = st.slider(
+            "Curriculum start p",
+            min_value=0.0005,
+            max_value=0.05,
+            value=min(max(0.001, float(p_phys * 1.25)), 0.05),
+            step=0.0005,
+            format="%.4f",
+        )
+        curriculum_p_end = st.slider(
+            "Curriculum end p",
+            min_value=0.0005,
+            max_value=0.05,
+            value=max(0.001, min(float(p_phys), 0.05)),
+            step=0.0005,
+            format="%.4f",
+            help="Lower target error rate for easier final tasks.",
+        )
+        curriculum_ramp_episodes = st.slider(
+            "Curriculum ramp episodes",
+            min_value=0,
+            max_value=max(episodes, 0),
+            value=min(episodes, 2000),
+            step=50,
+            help="Linear curriculum only; set to 0 for a single-shot schedule.",
+        )
+        max_gradient_norm = st.slider(
+            "Gradient clip norm",
+            min_value=0.0,
+            max_value=10.0,
+            value=1.0,
+            step=0.1,
+            help="Set to 0 to disable gradient clipping in PPO/SAC updates.",
+        )
+        early_stopping_patience = st.slider(
+            "Early stopping patience",
+            min_value=0,
+            max_value=200,
+            value=0,
+            step=5,
+            help="Set >0 to stop when validation window doesn't improve.",
+        )
+        early_stopping_min_delta = st.slider(
+            "Early stop minimum delta",
+            min_value=0.0,
+            max_value=0.2,
+            value=0.0,
+            step=0.005,
+            format="%.4f",
+        )
+        pepg_population_size = st.number_input(
+            "PEPG population size",
+            min_value=2,
+            max_value=256,
+            value=32,
+            step=2,
+            help="Even population size used by PEPG ask/tell updates.",
+        )
+        pepg_learning_rate = st.slider(
+            "PEPG mean learning rate",
+            min_value=0.001,
+            max_value=0.2,
+            value=0.05,
+            step=0.001,
+            format="%.3f",
+        )
+        pepg_sigma_learning_rate = st.slider(
+            "PEPG sigma learning rate",
+            min_value=0.0,
+            max_value=0.1,
+            value=0.02,
+            step=0.001,
+            format="%.3f",
+        )
 
     st.divider()
     diagram_type = st.selectbox(
@@ -264,17 +436,52 @@ def _init_state() -> None:
     defaults = dict(
         runner=None,
         history=[],
+        history_version=0,
+        history_dirty=False,
         latest_syndrome=None,
         latest_action=None,
         latest_correct=False,
         training_done=False,
         training_error=None,
         training_episode=0,
-        error_locations=None,  # for interactive error injection
+        error_locations=None,
+        latest_error_locations=None,
+        queue_drop_count=0,
+        threshold_sweep_job=None,
+        threshold_sweep_queue=None,
+        threshold_sweep_progress=0.0,
+        threshold_sweep_done=False,
+        threshold_sweep_error=None,
+        threshold_sweep_data=None,
+        backend_matrix_signature=None,
+        backend_profiler_signature=None,
     )
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+    # Remove legacy entries carried over from older app versions.
+    if "error_history" in st.session_state:
+        st.session_state.pop("error_history")
+
+    # Defensive sanitization for stale state left by prior UI versions.
+    history = st.session_state.get("history")
+    if isinstance(history, list) and len(history) > RL_HISTORY_MAX:
+        del history[: len(history) - RL_HISTORY_MAX]
+        st.session_state.history = history
+
+    if "error_locations" in st.session_state and not isinstance(st.session_state.error_locations, dict):
+        st.session_state.error_locations = None
+
+    threshold_job = st.session_state.get("threshold_sweep_job")
+    if threshold_job is not None and not getattr(threshold_job, "is_alive", lambda: False)():
+        st.session_state.threshold_sweep_job = None
+        st.session_state.threshold_sweep_queue = None
+        if (
+            st.session_state.get("threshold_sweep_error") is None
+            and st.session_state.get("threshold_sweep_data") is None
+        ):
+            st.session_state.threshold_sweep_error = "Threshold sweep ended unexpectedly."
 
 _init_state()
 
@@ -283,25 +490,556 @@ _init_state()
 # Helper: build Stim circuit
 # ------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
-def _get_circuit(distance: int, rounds: int, p: float):
+def _get_circuit(distance: int, rounds: int, p: float, builder: str | None = None):
     try:
-        import stim
-        from surface_code_in_stem.surface_code import surface_code_circuit_string
-        return stim.Circuit(surface_code_circuit_string(distance=distance, rounds=rounds, p=p))
+        return service_build_circuit(distance=distance, rounds=rounds, p=p, builder_name=builder)
+    except Exception as exc:
+        st.warning(f"Circuit build failed: {exc}")
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def _sample_detector_syndrome(distance: int, rounds: int, p: float, builder: str | None = None) -> np.ndarray | None:
+    circuit = _get_circuit(distance=distance, rounds=rounds, p=p, builder=builder)
+    if circuit is None:
+        return None
+
+    try:
+        sampler = circuit.compile_detector_sampler(seed=42)
+        det, _ = sampler.sample(1, separate_observables=True)
+        return det[0].astype(np.int8)
     except Exception:
         return None
+
+
+@st.cache_data(show_spinner=False)
+def _get_cached_circuit_diagnostics(
+    distance: int,
+    rounds: int,
+    p: float,
+    builder: str | None = None,
+) -> dict[str, int | float | str]:
+    circuit = _get_circuit(distance=distance, rounds=rounds, p=p, builder=builder)
+    if circuit is None:
+        return {}
+    try:
+        return {
+            "num_qubits": int(circuit.num_qubits),
+            "num_detectors": int(circuit.num_detectors),
+            "num_observables": int(circuit.num_observables),
+            "num_instructions": int(len(list(circuit))),
+            "distance": distance,
+            "rounds": rounds,
+            "physical_error_rate": float(p),
+        }
+    except Exception:
+        return {}
+
+
+def _append_history(entry: dict[str, Any], history: list[dict[str, Any]], max_len: int = RL_HISTORY_MAX) -> None:
+    history.append(entry)
+    if len(history) > max_len:
+        del history[: len(history) - max_len]
+
+
+def _export_history_json(history: list[dict[str, Any]]) -> str:
+    return history_to_download_json(history)
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [segment.strip() for segment in value.split(",") if segment.strip()]
+    if value is None:
+        return []
+    return [str(value).strip()]
+
+
+def _coerce_flag_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [segment.strip() for segment in value.split(",") if segment.strip()]
+    return [str(value)]
+
+
+def _chain_tokens(raw_chain: Any) -> list[str]:
+    if isinstance(raw_chain, list):
+        return [str(item).strip() for item in raw_chain if str(item).strip()]
+    if isinstance(raw_chain, tuple):
+        return [str(item).strip() for item in raw_chain if str(item).strip()]
+    if isinstance(raw_chain, str):
+        tokens = [segment.strip() for segment in raw_chain.split("->") if segment.strip()]
+        if tokens:
+            return tokens
+        return [segment.strip() for segment in raw_chain.split(",") if segment.strip()]
+    return []
+
+
+def _flag_text(value: Any) -> str:
+    flags = _coerce_flag_list(value)
+    if not flags:
+        return "none"
+    return ", ".join(dict.fromkeys(flags))
+
+
+def _backend_matrix_signature(
+    matrix_rows: list[dict[str, Any]],
+    scope: str,
+    window: int,
+) -> tuple[int, int, int, str, int]:
+    if not matrix_rows:
+        return (0, 0, 0, scope, int(window))
+    first_episode = int(matrix_rows[0].get("episode", 0))
+    last_episode = int(matrix_rows[-1].get("episode", first_episode))
+    return (len(matrix_rows), first_episode, last_episode, str(scope), int(window))
+
+
+def _backend_trace_records(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for idx, entry in enumerate(history):
+        if not isinstance(entry, dict):
+            continue
+        backend_id = entry.get("backend_id")
+        if not backend_id:
+            continue
+        trace_tokens = _coerce_str_list(entry.get("trace_tokens"))
+        backend_chain_tokens = entry.get("backend_chain_tokens")
+        if isinstance(backend_chain_tokens, (list, tuple)):
+            backend_chain_tokens = [str(item).strip() for item in backend_chain_tokens if str(item).strip()]
+        elif isinstance(backend_chain_tokens, str):
+            backend_chain_tokens = _chain_tokens(backend_chain_tokens)
+        else:
+            backend_chain_tokens = _chain_tokens(entry.get("backend_chain")) or trace_tokens
+        rows.append(
+            {
+                "episode": int(entry.get("episode", idx + 1)),
+                "backend_id": str(backend_id),
+                "backend_enabled": bool(entry.get("backend_enabled", False)),
+                "sample_us": float(entry.get("sample_us") or 0.0),
+                "sample_rate": float(entry.get("sample_rate") or 0.0),
+                "backend_version": entry.get("backend_version"),
+                "trace_tokens": trace_tokens,
+                "backend_chain": entry.get("backend_chain"),
+                "backend_chain_tokens": backend_chain_tokens,
+                "contract_flags": entry.get("contract_flags"),
+                "profiler_flags": entry.get("profiler_flags"),
+                "fallback_reason": entry.get("fallback_reason"),
+                "sample_trace_id": entry.get("sample_trace_id"),
+                "trace_id": entry.get("trace_id"),
+                "details": entry.get("details"),
+            }
+        )
+    return rows
+
+
+def _backend_trace_csv(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    fieldnames = [
+        "episode",
+        "backend_id",
+        "backend_enabled",
+        "sample_us",
+        "sample_rate",
+        "backend_version",
+        "backend_chain_tokens",
+        "backend_chain",
+        "contract_flags",
+        "profiler_flags",
+        "fallback_reason",
+        "sample_trace_id",
+        "trace_id",
+        "trace_tokens",
+        "details",
+    ]
+    buffer = StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        row_copy = dict(row)
+        row_copy["backend_enabled"] = int(bool(row_copy.get("backend_enabled")))
+        tokens = row_copy.get("trace_tokens")
+        if isinstance(tokens, list):
+            row_copy["trace_tokens"] = ",".join(tokens)
+        chain_tokens = row_copy.get("backend_chain_tokens")
+        if isinstance(chain_tokens, list):
+            row_copy["backend_chain_tokens"] = json.dumps(chain_tokens)
+        else:
+            row_copy["backend_chain_tokens"] = json.dumps(_coerce_str_list(chain_tokens))
+        details = row_copy.get("details")
+        if isinstance(details, (dict, list)):
+            try:
+                row_copy["details"] = json.dumps(details, sort_keys=True)
+            except TypeError:
+                row_copy["details"] = str(details)
+        elif details is None:
+            row_copy["details"] = ""
+        else:
+            row_copy["details"] = str(details)
+        writer.writerow(row_copy)
+    return buffer.getvalue()
+
+
+def _backend_profiler_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    aggregates = defaultdict(
+        lambda: {
+            "episodes": 0,
+            "fallback_episodes": 0,
+            "sample_us_total": 0.0,
+            "sample_rate_total": 0.0,
+            "trace_id_rows": 0,
+            "contract_disabled_rows": 0,
+            "profiler_missing_rows": 0,
+            "chain_values": set(),
+            "backend_chain_tokens": set(),
+            "sample_ids": set(),
+        }
+    )
+    for row in rows:
+        backend_id = str(row.get("backend_id") or "unknown")
+        state = aggregates[backend_id]
+        state["episodes"] += 1
+        if not bool(row.get("backend_enabled", False)):
+            state["fallback_episodes"] += 1
+        state["sample_us_total"] += float(row.get("sample_us") or 0.0)
+        state["sample_rate_total"] += float(row.get("sample_rate") or 0.0)
+        if row.get("sample_trace_id") is not None:
+            state["trace_id_rows"] += 1
+            if row.get("sample_trace_id") not in (None, ""):
+                state["sample_ids"].add(str(row.get("sample_trace_id")))
+        flags = _coerce_flag_list(row.get("contract_flags"))
+        if any("disabled" in flag for flag in flags):
+            state["contract_disabled_rows"] += 1
+        profiler_flags = _coerce_flag_list(row.get("profiler_flags"))
+        if not any("sample_trace_present" in flag for flag in profiler_flags):
+            state["profiler_missing_rows"] += 1
+        chain = row.get("backend_chain")
+        if isinstance(chain, str) and chain:
+            state["chain_values"].add(chain)
+        chain_tokens = row.get("backend_chain_tokens")
+        if isinstance(chain_tokens, (list, tuple)):
+            for token in chain_tokens:
+                token_text = str(token).strip()
+                if token_text:
+                    state["backend_chain_tokens"].add(token_text)
+        else:
+            for token in _chain_tokens(chain_tokens):
+                if token:
+                    state["backend_chain_tokens"].add(token)
+
+    summary_rows: list[dict[str, Any]] = []
+    for backend_id in sorted(aggregates):
+        state = aggregates[backend_id]
+        episodes = int(state["episodes"])
+        fallback_episodes = int(state["fallback_episodes"])
+        trace_id_rows = int(state["trace_id_rows"])
+        profiler_missing_rows = int(state["profiler_missing_rows"])
+        summary_rows.append(
+            {
+                "backend_id": backend_id,
+                "episodes": episodes,
+                "fallback_episodes": fallback_episodes,
+                "fallback_ratio": round(fallback_episodes / episodes, 4) if episodes else 0.0,
+                "avg_sample_us": round(state["sample_us_total"] / episodes, 6) if episodes else 0.0,
+                "avg_sample_rate": round(state["sample_rate_total"] / episodes, 6) if episodes else 0.0,
+                "trace_id_rows": trace_id_rows,
+                "trace_id_coverage": round(trace_id_rows / episodes, 4) if episodes else 0.0,
+                "unique_chain_paths": len(state["chain_values"]),
+                "unique_trace_id_count": len(state["sample_ids"]),
+                "contract_disabled_rows": state["contract_disabled_rows"],
+                "profiler_missing_rows": profiler_missing_rows,
+                "profiler_trace_coverage": round(
+                    1.0 - (profiler_missing_rows / episodes), 4
+                ) if episodes else 0.0,
+                "backend_chain_tokens": "; ".join(sorted(state["backend_chain_tokens"])) if state["backend_chain_tokens"] else "",
+            }
+        )
+    return summary_rows
+
+
+def _backend_profiler_summary_csv(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    fieldnames = [
+        "backend_id",
+        "episodes",
+        "fallback_episodes",
+        "fallback_ratio",
+        "avg_sample_us",
+        "avg_sample_rate",
+        "trace_id_rows",
+        "trace_id_coverage",
+        "unique_chain_paths",
+        "unique_trace_id_count",
+        "contract_disabled_rows",
+        "profiler_missing_rows",
+        "profiler_trace_coverage",
+        "backend_chain_tokens",
+    ]
+    buffer = StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return buffer.getvalue()
+
+
+def _backend_trace_matrix_figure(history: list[dict[str, Any]]) -> go.Figure:
+    records = _backend_trace_records(history)
+    if not records:
+        return go.Figure(layout_title_text="Backend trace matrix")
+    if len(records) > BACKEND_TRACE_MATRIX_MAX_COLUMNS:
+        records = records[-BACKEND_TRACE_MATRIX_MAX_COLUMNS:]
+    episodes = [int(entry.get("episode", idx + 1)) for idx, entry in enumerate(records)]
+    backends = sorted({str(entry.get("backend_id", "unknown")) for entry in records})
+    if "None" in backends:
+        backends.remove("None")
+    if not backends:
+        return go.Figure(layout_title_text="Backend trace matrix")
+
+    backend_index = {backend: row for row, backend in enumerate(backends)}
+    sample_matrix: list[list[float | None]] = [[float("nan") for _ in episodes] for _ in backends]
+    rate_matrix: list[list[float | None]] = [[float("nan") for _ in episodes] for _ in backends]
+    fallback_matrix: list[list[int]] = [[0 for _ in episodes] for _ in backends]
+    fallback_text: list[list[str]] = [["" for _ in episodes] for _ in backends]
+    for col, entry in enumerate(records):
+        backend = str(entry.get("backend_id", "unknown"))
+        if backend in backend_index:
+            sample_matrix[backend_index[backend]][col] = float(entry.get("sample_us", 0.0) or 0.0)
+            rate_matrix[backend_index[backend]][col] = float(entry.get("sample_rate", 0.0) or 0.0)
+            if not bool(entry.get("backend_enabled", True)):
+                fallback_matrix[backend_index[backend]][col] = 1
+                fallback_text[backend_index[backend]][col] = "F"
+
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.08, subplot_titles=[
+        "Sampling latency by backend (µs)",
+        "Sampling throughput by backend (samples/s)",
+        "Fallback status by backend (1 = fallback path)",
+    ])
+    fig.add_trace(
+        go.Heatmap(
+            z=sample_matrix,
+            x=episodes,
+            y=backends,
+            colorscale="Agsunset",
+            hovertemplate="backend=%{y}<br>episode=%{x}<br>sample time=%{z:.3f} µs<extra></extra>",
+            colorbar=dict(title_text="Sampling time (µs)"),
+            showscale=True,
+            name="Sampling time (µs)",
+            showlegend=True,
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Heatmap(
+            z=rate_matrix,
+            x=episodes,
+            y=backends,
+            colorscale="Blues",
+            hovertemplate="backend=%{y}<br>episode=%{x}<br>sampling rate=%{z:.2f} /s<extra></extra>",
+            colorbar=dict(title_text="Samples per second"),
+            showscale=True,
+            name="Sampling rate (1/s)",
+            showlegend=True,
+        ),
+        row=2,
+        col=1,
+    )
+    fig.add_trace(
+        go.Heatmap(
+            z=fallback_matrix,
+            x=episodes,
+            y=backends,
+            zmin=0,
+            zmax=1,
+            text=fallback_text,
+            texttemplate="%{text}",
+            textfont=dict(color="#ffffff", size=10),
+            colorscale=[(0.0, "rgba(32, 48, 80, 0.08)"), (1.0, "rgba(255, 102, 102, 0.95)")],
+            hovertemplate="backend=%{y}<br>episode=%{x}<br>fallback path=%{z:.0f}<extra></extra>",
+            colorbar=dict(
+                title_text="Fallback event",
+                tickvals=[0, 1],
+                ticktext=["No", "Yes"],
+            ),
+            showscale=True,
+            name="Fallback path",
+            showlegend=True,
+        ),
+        row=3,
+        col=1,
+    )
+    fig.update_layout(
+        title="Backend × Episode trace matrix",
+        xaxis_title="Episode",
+        yaxis_title="Backend (sampling backend)",
+        template="plotly_white",
+        height=max(360, 90 * len(backends)),
+        margin=dict(t=90, l=90, r=20, b=40),
+        legend=dict(orientation="h", y=1.03, x=0.0, xanchor="left"),
+    )
+    fig.update_xaxes(
+        tickmode="linear",
+        dtick=max(1, len(episodes) // 8),
+        title_text="Episode",
+        row=1,
+        col=1,
+    )
+    fig.update_xaxes(
+        tickmode="linear",
+        dtick=max(1, len(episodes) // 8),
+        title_text="Episode",
+        row=2,
+        col=1,
+    )
+    fig.update_xaxes(
+        tickmode="linear",
+        dtick=max(1, len(episodes) // 8),
+        title_text="Episode",
+        row=3,
+        col=1,
+    )
+    fig.update_yaxes(title_text="Backend", row=1, col=1)
+    fig.update_yaxes(title_text="Backend", row=2, col=1)
+    fig.update_yaxes(title_text="Backend", row=3, col=1)
+    return fig
+
+
+def _start_threshold_sweep_job(
+    *,
+    distances: list[int],
+    p_values: list[float],
+    shots: int,
+    builder: str,
+    decoder: str,
+    seed: int = 7,
+) -> None:
+    running = st.session_state.threshold_sweep_job
+    if running is not None and getattr(running, "is_alive", lambda: False)():
+        return
+
+    event_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1024)
+    st.session_state.threshold_sweep_queue = event_queue
+    st.session_state.threshold_sweep_progress = 0.0
+    st.session_state.threshold_sweep_done = False
+    st.session_state.threshold_sweep_error = None
+    st.session_state.threshold_sweep_data = None
+
+    def worker() -> None:
+        try:
+            data = run_threshold_sweep(
+                distances=sorted(distances),
+                p_values=p_values,
+                shots=shots,
+                builder_name=builder,
+                decoder_name=decoder,
+                seed=seed,
+                on_progress=lambda done, total: event_queue.put(("progress", done / total if total else 0.0)),
+            )
+            event_queue.put(("result", data))
+        except Exception as exc:
+            event_queue.put(("error", str(exc)))
+
+    job = threading.Thread(target=worker, daemon=True)
+    st.session_state.threshold_sweep_job = job
+    job.start()
+
+
+def _poll_threshold_sweep_job() -> None:
+    job = st.session_state.threshold_sweep_job
+    event_queue = st.session_state.threshold_sweep_queue
+    if job is None or event_queue is None:
+        return
+
+    while True:
+        try:
+            kind, payload = event_queue.get_nowait()
+        except queue.Empty:
+            break
+        if kind == "progress":
+            st.session_state.threshold_sweep_progress = float(payload)
+        elif kind == "result":
+            st.session_state.threshold_sweep_data = payload
+            st.session_state.threshold_sweep_done = True
+            st.session_state.threshold_sweep_progress = 1.0
+            st.session_state.threshold_sweep_job = None
+            st.session_state.threshold_sweep_queue = None
+        elif kind == "error":
+            st.session_state.threshold_sweep_error = str(payload)
+            st.session_state.threshold_sweep_done = True
+            st.session_state.threshold_sweep_job = None
+            st.session_state.threshold_sweep_queue = None
+
+    if job is not None and not job.is_alive() and st.session_state.threshold_sweep_queue is not None:
+        st.session_state.threshold_sweep_job = None
+        if st.session_state.threshold_sweep_data is None and st.session_state.threshold_sweep_error is None:
+            st.session_state.threshold_sweep_error = "Threshold sweep ended unexpectedly."
+
+
+def _reset_rl_runtime_state() -> None:
+    st.session_state.history = []
+    st.session_state.history_version = 0
+    st.session_state.history_dirty = False
+    st.session_state.latest_syndrome = None
+    st.session_state.latest_action = None
+    st.session_state.latest_correct = False
+    st.session_state.training_done = False
+    st.session_state.training_error = None
+    st.session_state.training_episode = 0
+    st.session_state.latest_error_locations = None
+    st.session_state.error_locations = None
+    st.session_state.queue_drop_count = 0
+    st.session_state.pop("error_history", None)
+    st.session_state.backend_matrix_signature = None
+    st.session_state.backend_profiler_signature = None
+
+
+def _render_circuit_panel(circuit, visualizer: str, diagram_style: str, *, height: int = 540):
+    if visualizer == "matchgraph":
+        html_str = circuit_matchgraph_html(circuit)
+        st.components.v1.html(html_str, height=height, scrolling=True)
+        return
+
+    if visualizer == "plotly":
+        fig = get_visualizer("plotly").render_circuit(circuit)
+        st.plotly_chart(fig, width="stretch")
+        return
+
+    if visualizer == "crumble":
+        html_str = circuit_interactive_html(circuit)
+        st.components.v1.html(html_str, height=height, scrolling=True)
+        return
+
+    if visualizer == "svg":
+        svg_str = circuit_svg(circuit, diagram_style)
+    else:
+        try:
+            svg_str = str(get_visualizer(visualizer).render_circuit(circuit))
+        except Exception:
+            svg_str = circuit_svg(circuit, diagram_style)
+
+    st.markdown(f'<div class="circuit-panel">{svg_str}</div>', unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------
 # Tabs
 # ------------------------------------------------------------------
-tab_circuit, tab_rl, tab_colour, tab_threshold, tab_footprint, tab_research = st.tabs([
+tab_circuit, tab_rl, tab_threshold, tab_footprint = st.tabs([
     "🔬 Circuit Viewer",
     "⚡ RL Live Training",
-    "🎨 Colour Codes",
     "📈 Threshold Explorer",
     "🛰 Teraquop Footprint",
-    "📡 Research Tracker",
 ])
 
 
@@ -315,7 +1053,7 @@ with tab_circuit:
         "Switch between timeline and detector-slice views in the sidebar."
     )
 
-    circuit = _get_circuit(distance, rounds, p_phys)
+    circuit = _get_circuit(distance, rounds, p_phys, code_family)
     if circuit is None:
         st.error("Could not build circuit — check that `stim` is installed.")
     else:
@@ -323,33 +1061,14 @@ with tab_circuit:
 
         with col_svg:
             st.markdown("#### Circuit diagram")
-            view_mode = st.radio(
-                "View",
-                ["Static SVG", "Interactive (Crumble)"],
-                horizontal=True,
-                label_visibility="collapsed",
-            )
-            if view_mode == "Static SVG":
-                svg_str = circuit_svg(circuit, diagram_type)
-                st.markdown(
-                    f'<div class="circuit-panel">{svg_str}</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                html_str = circuit_interactive_html(circuit)
-                st.components.v1.html(html_str, height=540, scrolling=True)
+            _render_circuit_panel(circuit, visualizer_name, diagram_type, height=540)
 
         with col_graph:
             st.markdown("#### Detector error graph")
             st.caption("Nodes = detectors · Edges = DEM connections")
 
             # Sample one syndrome to highlight fired detectors
-            try:
-                sampler = circuit.compile_detector_sampler(seed=42)
-                det, _ = sampler.sample(1, separate_observables=True)
-                syn = det[0].astype(np.int8)
-            except Exception:
-                syn = None
+            syn = _sample_detector_syndrome(distance=distance, rounds=rounds, p=p_phys, builder=code_family)
 
             dem_fig = detector_graph(circuit, syndrome=syn, title="DEM — sample syndrome")
             st.plotly_chart(dem_fig, width="stretch")
@@ -363,18 +1082,16 @@ with tab_circuit:
             st.caption(f"🔴 {fired} / {len(syn)} detectors fired in this shot.")
 
         with st.expander("Circuit statistics"):
-            try:
-                st.json({
-                    "num_qubits": circuit.num_qubits,
-                    "num_detectors": circuit.num_detectors,
-                    "num_observables": circuit.num_observables,
-                    "num_instructions": len(list(circuit)),
-                    "distance": distance,
-                    "rounds": rounds,
-                    "physical_error_rate": p_phys,
-                })
-            except Exception as e:
-                st.warning(str(e))
+            diagnostics = _get_cached_circuit_diagnostics(
+                distance=distance,
+                rounds=rounds,
+                p=p_phys,
+                builder=code_family,
+            )
+            if diagnostics:
+                st.json(diagnostics)
+            else:
+                st.warning("Circuit diagnostics unavailable")
 
 
 # ==================================================================
@@ -383,11 +1100,11 @@ with tab_circuit:
 with tab_rl:
     st.markdown("## ⚡ Live RL Training")
     st.markdown(
-        "Train a Transformer-PPO (discrete decoding) or Continuous SAC (calibration) agent "
+        "Train Transformer-PPO (discrete decoding), Continuous SAC (calibration), or PEPG (control) "
         "and watch metrics + syndrome snapshots update in real time."
     )
 
-    runner: RLRunner | None = st.session_state.runner
+    runner: RLTrainingService | None = st.session_state.runner
 
     ctrl_col, status_col = st.columns([2, 3])
     with ctrl_col:
@@ -402,14 +1119,16 @@ with tab_rl:
         if runner and runner.is_running():
             st.warning("Training is already running.")
         else:
-            st.session_state.history = []
-            st.session_state.latest_syndrome = None
-            st.session_state.training_done = False
-            st.session_state.training_error = None
-            st.session_state.training_episode = 0
-            st.session_state.latest_error_locations = None
-            st.session_state.error_history = []
-            new_runner = RLRunner(
+            _reset_rl_runtime_state()
+            from surface_code_in_stem.accelerators import qhybrid_backend
+            capability = qhybrid_backend.probe_capability()
+            auto_use_accelerated = bool(capability.get("enabled", False))
+            resolved_sampling_backend = None if sampling_backend == "auto" else sampling_backend
+            resolved_use_accelerated = auto_use_accelerated if sampling_backend == "auto" else sampling_backend != "stim"
+            trace_token = (
+                benchmark_probe_token.strip() if isinstance(benchmark_probe_token, str) else ""
+            )
+            service_config = RLTrainingConfig(
                 mode=rl_mode,
                 distance=distance,
                 rounds=rounds,
@@ -417,8 +1136,28 @@ with tab_rl:
                 episodes=episodes,
                 batch_size=batch_size,
                 use_diffusion=use_diff,
+                use_accelerated=resolved_use_accelerated,
+                sampling_backend=resolved_sampling_backend,
+                decoder_name=rl_decoder,
+                enable_profile_traces=enable_profile_traces,
+                benchmark_probe_token=trace_token or None,
+                protocol=protocol_name,
                 syndrome_emit_every=max(1, episodes // 40),
+                seed=seed,
+                curriculum_enabled=curriculum_enabled,
+                curriculum_distance_start=curriculum_distance_start,
+                curriculum_distance_end=curriculum_distance_end,
+                curriculum_p_start=curriculum_p_start,
+                curriculum_p_end=curriculum_p_end,
+                curriculum_ramp_episodes=curriculum_ramp_episodes,
+                early_stopping_patience=early_stopping_patience,
+                early_stopping_min_delta=early_stopping_min_delta,
+                max_gradient_norm=max_gradient_norm,
+                pepg_population_size=int(pepg_population_size),
+                pepg_learning_rate=float(pepg_learning_rate),
+                pepg_sigma_learning_rate=float(pepg_sigma_learning_rate),
             )
+            new_runner = RLTrainingService(service_config)
             new_runner.start()
             st.session_state.runner = new_runner
 
@@ -436,6 +1175,8 @@ with tab_rl:
 
     chart_metrics   = st.empty()
     chart_syndrome  = st.empty()
+    chart_policy    = st.empty()
+    chart_backend_matrix = st.empty()
 
     st.divider()
     col_heatmap, col_ler = st.columns(2)
@@ -490,244 +1231,303 @@ with tab_rl:
     
     with rl_right:
         st.markdown("**Circuit Viewer (during training)**")
-        circuit = _get_circuit(distance, rounds, p_phys)
+        circuit = _get_circuit(distance, rounds, p_phys, code_family)
         if circuit is None:
             st.error("Could not build circuit")
         else:
-            view_mode = st.radio(
-                "View",
-                ["Static SVG", "Interactive (Crumble)"],
-                horizontal=True,
-                key="rl_circuit_view"
-            )
-            if view_mode == "Static SVG":
-                svg_str = circuit_svg(circuit, diagram_type)
-                st.markdown(f'<div class="circuit-panel">{svg_str}</div>', unsafe_allow_html=True)
-            else:
-                html_str = circuit_interactive_html(circuit)
-                st.components.v1.html(html_str, height=480, scrolling=True)
+            _render_circuit_panel(circuit, visualizer_name, diagram_type, height=480)
             
             st.caption("Detector graph and heatmap below")
-            try:
-                sampler = circuit.compile_detector_sampler(seed=42)
-                det, _ = sampler.sample(1, separate_observables=True)
-                syn = det[0].astype(np.int8)
-                dem_fig = detector_graph(circuit, syndrome=syn, title="DEM — sample")
-                st.plotly_chart(dem_fig, use_container_width=True)
-                hm_fig = syndrome_heatmap(syn, distance=distance, title="Syndrome Heatmap")
-                st.plotly_chart(hm_fig, use_container_width=True)
-            except Exception as e:
-                st.warning(f"Circuit viz error: {e}")
+            syn = _sample_detector_syndrome(distance=distance, rounds=rounds, p=p_phys, builder=code_family)
+            if syn is not None:
+                try:
+                    dem_fig = detector_graph(circuit, syndrome=syn, title="DEM — sample")
+                    st.plotly_chart(dem_fig, use_container_width=True)
+                    hm_fig = syndrome_heatmap(syn, distance=distance, title="Syndrome Heatmap")
+                    st.plotly_chart(hm_fig, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"Circuit viz error: {e}")
         
+    # Generate live visualization (left column only)
+    history = st.session_state.history
+    syn = st.session_state.latest_syndrome
+    action = st.session_state.latest_action
+    reward = history[-1].get('reward', 0.0) if history else 0.0
+    correct = st.session_state.latest_correct
+    ep = st.session_state.training_episode
+    
     with rl_left:
-        if st.session_state.latest_syndrome is None:
-            live_lattice.info("▶ Start training to see live lattice")
-
-    # ------------------------------------------------------------------
-    # Live fragment — auto-refreshes every 150 ms while training is live
-    # ------------------------------------------------------------------
-    @st.fragment(run_every=0.15)
-    def _live_rl_fragment(
-        _status_box, _kpi_episode, _kpi_reward, _kpi_success, _kpi_mwpm,
-        _chart_metrics, _chart_heatmap, _chart_ler, _live_lattice, _distance,
-    ):
-        """Drains training events and re-renders live metrics without full page reload."""
-        _runner = st.session_state.runner
-
-        # Drain queued events
-        if _runner and _runner.is_running():
-            events = _runner.drain()
-            for ev in events:
-                if isinstance(ev, MetricEvent):
-                    st.session_state.history.append(ev.data)
-                    st.session_state.training_episode = int(ev.data.get("episode", 0))
-                elif isinstance(ev, SyndromeEvent):
-                    st.session_state.latest_syndrome = ev.syndrome
-                    st.session_state.latest_action   = ev.action
-                    st.session_state.latest_correct  = ev.correct
-                elif isinstance(ev, DoneEvent):
-                    st.session_state.training_done = True
-                elif isinstance(ev, ErrorEvent):
-                    st.session_state.training_error = ev.message
-
-        # Status badge
-        if _runner and _runner.is_running():
-            _status_box.markdown(
-                '<span class="live-indicator"></span> <span class="badge-running">TRAINING LIVE</span>',
-                unsafe_allow_html=True,
-            )
-        elif st.session_state.training_done:
-            _status_box.markdown('<span class="badge-done">✅ Training complete</span>', unsafe_allow_html=True)
-        elif st.session_state.training_error:
-            _status_box.markdown(
-                f'<span class="badge-error">❌ Error: {st.session_state.training_error}</span>',
-                unsafe_allow_html=True,
-            )
-        else:
-            _status_box.markdown("*Press ▶ Start Training to begin.*")
-
-        # KPIs + charts
-        history = st.session_state.history
-        ep = st.session_state.training_episode or len(history)
-
-        _kpi_episode.metric("Episode", f"{ep:,}")
-        if history:
-            latest = history[-1]
-            _kpi_reward.metric("Last reward", f"{latest.get('reward', 0):.3f}")
-            _kpi_success.metric("RL success", f"{latest.get('rl_success', 0):.1%}")
-            _kpi_mwpm.metric("MWPM success", f"{latest.get('mwpm_success', 0):.1%}")
-
-            _chart_metrics.plotly_chart(rl_metrics_panel(history, window=20), width="stretch")
-
-            ler_vals = [h.get("logical_error_rate", 0.0) for h in history]
-            if any(v > 0 for v in ler_vals):
-                _chart_ler.plotly_chart(logical_error_rate_panel(history, window=10), width="stretch")
-
-        syn = st.session_state.latest_syndrome
-        if syn is not None and len(syn) > 0:
-            _chart_heatmap.plotly_chart(
-                syndrome_heatmap(
-                    syn, distance=_distance,
-                    title=f"Syndrome snapshot — ep {ep}  "
-                          f"{'✅ correct' if st.session_state.latest_correct else '❌ error'}",
-                ),
-                width="stretch",
-            )
-            # Live lattice visualization
+        if syn is not None:
             try:
-                action = st.session_state.latest_action
-                reward = history[-1].get("reward", 0.0) if history else 0.0
-                correct = st.session_state.latest_correct
                 viz_result = generate_live_rl_visualization(
-                    distance=_distance,
+                    distance=distance,
                     syndrome=syn,
                     action=action,
                     correct=correct,
                     episode=ep,
                     reward=reward,
-                    error_locations=st.session_state.get("error_locations"),
+                    error_locations=st.session_state.get('error_locations'),
                 )
-                _live_lattice.plotly_chart(
-                    viz_result["lattice"],
+                live_lattice.plotly_chart(viz_result['lattice'], use_container_width=True, key=f"live_lattice_{ep}")
+                
+                stats = viz_result.get('stats', {})
+                st.metric("Active Syndromes", f"{int(stats.get('syndrome_weight', 0))}/{stats.get('n_x_ancilla', 0) + stats.get('n_z_ancilla', 0)}")
+                st.metric("Code Distance", f"d={distance}")
+            except Exception as e:
+                st.error(f"Live viz error: {e}")
+        else:
+            st.info("Start training to see live lattice")
+
+    # ------------------------------------------------------------------
+    # Poll loop — runs on each Streamlit rerun cycle
+    # ------------------------------------------------------------------
+    runner = st.session_state.runner
+
+    if runner and runner.is_running():
+        status_box.markdown(
+            '<span class="live-indicator"></span> <span class="badge-running">TRAINING LIVE</span>',
+            unsafe_allow_html=True,
+        )
+
+        # Drain all queued events this cycle
+        events = runner.drain_events(max_events=80, coalesce=True)
+        if runner.dropped_events() != st.session_state.queue_drop_count:
+            st.session_state.queue_drop_count = runner.dropped_events()
+
+        metrics_updated = False
+        for ev in events:
+            if ev.kind == "metric":
+                data = metric_payload_for_history(ev.payload)
+                _append_history(data, st.session_state.history)
+                st.session_state.history_version += 1
+                st.session_state.history_dirty = True
+                metrics_updated = True
+                st.session_state.training_episode = int(data.get("episode", 0))
+            elif ev.kind == "syndrome":
+                st.session_state.latest_syndrome = np.asarray(ev.payload.get("syndrome", []), dtype=np.int8)
+                st.session_state.latest_action = np.asarray(ev.payload.get("action", []), dtype=np.int8)
+                st.session_state.latest_correct = bool(ev.payload.get("correct", False))
+                st.session_state.history_dirty = st.session_state.history_dirty or metrics_updated
+            elif ev.kind == "done":
+                st.session_state.training_done = True
+            elif ev.kind == "error":
+                st.session_state.training_error = ev.payload.get("message", "")
+
+        # Schedule rerun to keep polling
+        time.sleep(0.05)
+        st.rerun()
+
+    elif st.session_state.training_done:
+        status_box.markdown(
+            '<span class="badge-done">✅ Training complete</span>', unsafe_allow_html=True
+        )
+    elif st.session_state.training_error:
+        status_box.markdown(
+            f'<span class="badge-error">❌ Error: {st.session_state.training_error}</span>',
+            unsafe_allow_html=True,
+        )
+    else:
+        status_box.markdown("*Press ▶ Start Training to begin.*")
+
+    # ------------------------------------------------------------------
+    # Render charts from session history
+    # ------------------------------------------------------------------
+    history = st.session_state.history
+    ep = st.session_state.training_episode or (len(history))
+
+    kpi_episode.metric("Episode", f"{ep:,}")
+    if history:
+        latest = history[-1]
+        backend_rows = _backend_trace_records(history)
+        if backend_matrix_scope == "recent episodes":
+            window_size = max(1, int(backend_matrix_window))
+            matrix_rows = backend_rows[-window_size:]
+        else:
+            matrix_rows = backend_rows
+        profiler_summary = (
+            _backend_profiler_summary(matrix_rows) if show_profiler_panel else []
+        )
+        display_window = backend_matrix_window if backend_matrix_scope == "recent episodes" else 0
+        matrix_signature = _backend_matrix_signature(matrix_rows, backend_matrix_scope, display_window)
+        should_render_matrix = (
+            st.session_state.history_dirty
+            or st.session_state.get("backend_matrix_signature") != matrix_signature
+        )
+        profiler_signature = (
+            matrix_signature,
+            bool(show_profiler_panel),
+            len(matrix_rows),
+        )
+        should_render_profiler = (
+            show_profiler_panel
+            and (
+                st.session_state.history_dirty
+                or st.session_state.get("backend_profiler_signature") != profiler_signature
+            )
+        )
+        latest_backend_enabled = bool(latest.get("backend_enabled", False))
+        latest_fallback_mode = "Primary backend" if latest_backend_enabled else "Fallback path"
+        latest_fallback_reason = latest.get("fallback_reason")
+        if latest_backend_enabled and not latest_fallback_reason:
+            latest_fallback_reason = "No fallback used"
+
+        kpi_reward.metric("Last reward", f"{latest.get('reward', 0):.3f}")
+        kpi_success.metric("RL success", f"{latest.get('rl_success', 0):.1%}")
+        kpi_mwpm.metric("MWPM success", f"{latest.get('mwpm_success', 0):.1%}")
+        backend_panel = st.expander("Backend trace (latest metric)", expanded=False)
+        backend_panel.markdown(f"**Backend mode:** {latest_fallback_mode}")
+        if not latest_backend_enabled and latest_fallback_reason:
+            backend_panel.caption(f"Fallback reason: {latest_fallback_reason}")
+        backend_panel.json(
+            {
+                "backend_id": latest.get("backend_id"),
+                "backend_mode": latest_fallback_mode,
+                "backend_enabled": latest_backend_enabled,
+                "backend_version": latest.get("backend_version"),
+                "sample_us": latest.get("sample_us"),
+                "sample_rate": latest.get("sample_rate"),
+                "trace_tokens": latest.get("trace_tokens"),
+                "backend_chain": latest.get("backend_chain"),
+                "contract_flags": _flag_text(latest.get("contract_flags")),
+                "profiler_flags": _flag_text(latest.get("profiler_flags")),
+                "fallback_reason": latest_fallback_reason,
+                "trace_id": latest.get("trace_id"),
+                "sample_trace_id": latest.get("sample_trace_id"),
+                "details": latest.get("details"),
+                "ler_ci": latest.get("ler_ci"),
+            }
+        )
+        backend_panel.download_button(
+            "Download backend trace (JSON)",
+            data=_export_history_json(matrix_rows),
+            file_name="rl_backend_trace.json",
+            mime="application/json",
+            use_container_width=False,
+            key="rl-backend-trace-json",
+        )
+        backend_panel.download_button(
+            "Download backend trace (CSV)",
+            data=_backend_trace_csv(matrix_rows),
+            file_name="rl_backend_trace.csv",
+            mime="text/csv",
+            use_container_width=False,
+            key="rl-backend-trace-csv",
+        )
+        if should_render_profiler:
+            backend_panel.markdown("#### Profiler diagnostics")
+            if profiler_summary:
+                profiler_cols = backend_panel.columns(3)
+                profiler_cols[0].metric("Backends", len(profiler_summary))
+                profiler_cols[1].metric(
+                    "Total backend rows",
+                    sum(row.get("episodes", 0) for row in profiler_summary),
+                )
+                profiler_cols[2].metric(
+                    "Max fallback ratio",
+                    f"{max((row.get('fallback_ratio', 0.0) or 0.0) for row in profiler_summary):.1%}",
+                )
+                backend_panel.dataframe(
+                    [
+                        {
+                            "Backend": row.get("backend_id"),
+                            "Episodes": row.get("episodes"),
+                            "Fallback ratio": f"{row.get('fallback_ratio', 0.0):.1%}",
+                            "Avg sample (µs)": f"{row.get('avg_sample_us', 0.0):.4f}",
+                            "Avg rate (/s)": f"{row.get('avg_sample_rate', 0.0):.3f}",
+                            "Trace coverage": f"{row.get('profiler_trace_coverage', 0.0):.1%}",
+                            "Trace ID coverage": f"{row.get('trace_id_coverage', 0.0):.1%}",
+                            "Fallback rows": row.get("fallback_episodes", 0),
+                            "Contract disabled rows": row.get("contract_disabled_rows", 0),
+                            "Profiler missing rows": row.get("profiler_missing_rows", 0),
+                            "Unique trace IDs": row.get("unique_trace_id_count", 0),
+                        }
+                        for row in profiler_summary
+                    ],
                     use_container_width=True,
-                    key=f"frag_lattice_{ep}",
+                    hide_index=True,
                 )
-            except Exception:
-                pass
-
-    _live_rl_fragment(
-        status_box, kpi_episode, kpi_reward, kpi_success, kpi_mwpm,
-        chart_metrics, chart_heatmap, chart_ler, live_lattice, distance,
-    )
-
-
-# ==================================================================
-# TAB 3 — Colour Codes
-# ==================================================================
-with tab_colour:
-    st.markdown("## 🎨 Colour Code Lab")
-    st.markdown(
-        "Explore QEC colour codes with hexagonal lattice geometry. "
-        "Triangular patches support transversal Clifford gates. "
-        "Reference: Lee & Brown, Quantum 9, 1609 (2025)"
-    )
-    
-    cc_col1, cc_col2 = st.columns([1, 2])
-    
-    with cc_col1:
-        st.markdown("### Configuration")
-        cc_distance = st.selectbox("Distance", [3, 5, 7, 9, 11], index=1, key="cc_dist")
-        cc_type = st.selectbox("Circuit type", ["tri", "rec", "growing", "cult+growing"], key="cc_type")
-        cc_rounds = st.slider("Rounds", 1, 10, 5, key="cc_rounds")
-        cc_p = st.slider("Physical error rate", 0.001, 0.02, 0.01, step=0.001, key="cc_p", format="%.3f")
-        cc_superdense = st.checkbox("Superdense circuit", value=False, key="cc_super")
-        
-        st.divider()
-        st.markdown("### Visualize")
-        viz_btn = st.button("Show Lattice", type="primary", use_container_width=True)
-        circuit_btn = st.button("Generate Circuit", use_container_width=True)
-    
-    with cc_col2:
-        if viz_btn:
-            st.markdown("#### Hexagonal Lattice")
-            fig = create_hexagonal_lattice(
-                distance=cc_distance,
-                title=f"Colour Code d={cc_distance} — {cc_type} patch"
+                backend_panel.download_button(
+                    "Download profiler summary (JSON)",
+                    data=_export_history_json(profiler_summary),
+                    file_name="rl_backend_profiler_summary.json",
+                    mime="application/json",
+                    use_container_width=False,
+                    key="rl-backend-profiler-summary-json",
+                )
+                backend_panel.download_button(
+                    "Download profiler summary (CSV)",
+                    data=_backend_profiler_summary_csv(profiler_summary),
+                    file_name="rl_backend_profiler_summary.csv",
+                    mime="text/csv",
+                    use_container_width=False,
+                    key="rl-backend-profiler-summary-csv",
+                )
+                st.session_state.backend_profiler_signature = profiler_signature
+            else:
+                backend_panel.info("Profiler diagnostics are not available for current dataset.")
+                st.session_state.backend_profiler_signature = profiler_signature
+        if show_profiler_panel:
+            if not should_render_profiler:
+                backend_panel.caption("Profiler diagnostics are up to date.")
+        refresh_charts = bool(st.session_state.history_dirty)
+        should_render_policy = refresh_charts or st.session_state.get("history_version", 0) == 0
+        if st.session_state.history_dirty:
+            chart_metrics.plotly_chart(
+                rl_metrics_panel(
+                    history,
+                    window=min(RL_METRIC_WINDOW, max(1, len(history))),
+                ),
+                width="stretch",
             )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            st.caption(
-                f"🔴 Red (X) plaquettes  •  🔵 Blue (Z) plaquettes  •  "
-                f"⚫ Data qubits  •  {cc_distance**2} data qubits approximately"
+
+        if should_render_matrix:
+            chart_backend_matrix.plotly_chart(
+                _backend_trace_matrix_figure(matrix_rows),
+                width="stretch",
             )
-        
-        if circuit_btn:
-            st.markdown("#### Stim Circuit")
-            try:
-                from color_code_stim import ColorCode, NoiseModel as CCNoiseModel
-                from syndrome_net import CircuitSpec
-                from syndrome_net.codes import ColorCodeStimBuilder
-                
-                spec = CircuitSpec(
-                    distance=cc_distance,
-                    rounds=cc_rounds,
-                    error_probability=cc_p,
-                    circuit_type=cc_type,
-                    superdense=cc_superdense
+            st.session_state.backend_matrix_signature = matrix_signature
+
+        if should_render_policy and any(
+            h.get("policy_loss", 0)
+            or h.get("value_loss", 0)
+            or h.get("alpha_loss", 0)
+            or h.get("policy_updates", 0)
+            or h.get("sigma_mean", 0)
+            for h in history
+        ):
+            chart_policy.plotly_chart(
+                policy_diagnostics_panel(
+                    history,
+                    window=min(RL_METRIC_WINDOW, max(1, len(history))),
+                ),
+                width="stretch",
+            )
+
+        ler_vals = [h.get("logical_error_rate", 0.0) for h in history]
+        if any(v > 0 for v in ler_vals):
+            if refresh_charts or st.session_state.get("history_version", 0) == 0:
+                chart_ler.plotly_chart(
+                    logical_error_rate_panel(
+                        history,
+                        window=min(RL_LERP_WINDOW, max(1, len(history))),
+                    ),
+                    width="stretch",
                 )
-                builder = ColorCodeStimBuilder()
-                circuit = builder.build(spec)
-                
-                st.success(
-                    f"✅ Circuit generated: {circuit.num_qubits} qubits, "
-                    f"{circuit.num_detectors} detectors, {circuit.num_observables} observables"
-                )
-                
-                # Show circuit diagram
-                try:
-                    svg_str = circuit.diagram("timeline-svg")
-                    st.markdown(f'<div class="circuit-panel">{svg_str}</div>', unsafe_allow_html=True)
-                except Exception:
-                    st.code(str(circuit)[:2000])
-                
-                # Sample syndrome
-                sampler = circuit.compile_detector_sampler(seed=42)
-                det, obs = sampler.sample(1, separate_observables=True)
-                syn = det[0].astype(np.int8)
-                fired = int(np.sum(syn))
-                st.caption(f"🔴 {fired} / {len(syn)} detectors fired in sample shot")
-                
-                # Syndrome heatmap
-                hm_fig = create_colour_code_syndrome_heatmap(syn, distance=cc_distance)
-                st.plotly_chart(hm_fig, use_container_width=True)
-                
-            except ImportError as exc:
-                st.error(f"color-code-stim not installed: {exc}")
-            except Exception as exc:
-                st.error(f"Circuit generation failed: {exc}")
-    
-    # RL Training for colour codes
-    st.divider()
-    st.markdown("### RL Training — Colour Code Decoding")
-    
-    cc_train_col1, cc_train_col2 = st.columns([1, 3])
-    
-    with cc_train_col1:
-        cc_rl_mode = st.selectbox("RL Mode", ["ppo_colour", "sac_colour", "discover_colour"], key="cc_rl_mode")
-        cc_episodes = st.slider("Episodes", 50, 1000, 200, step=50, key="cc_episodes")
-        cc_batch = st.slider("Batch size", 16, 128, 32, step=16, key="cc_batch")
-        
-        cc_start = st.button("▶ Train Colour Code Agent", type="primary", use_container_width=True)
-        cc_stop = st.button("⏹ Stop", use_container_width=True)
-    
-    with cc_train_col2:
-        if cc_start:
-            st.info("Colour code RL training would start here — fully integrated with RLRunner")
-            st.caption("Uses ColourCodeGymEnv with concatenated MWPM baseline for comparison")
+        if refresh_charts:
+            st.session_state.history_dirty = False
+
+    syn = st.session_state.latest_syndrome
+    if syn is not None and len(syn) > 0:
+        hm = syndrome_heatmap(
+            syn, distance=distance,
+            title=f"Syndrome snapshot — ep {ep}  "
+                  f"{'✅ correct' if st.session_state.latest_correct else '❌ error'}",
+        )
+        chart_heatmap.plotly_chart(hm, width="stretch")
 
 
 # ==================================================================
-# TAB 4 — Threshold Explorer
+# TAB 3 — Threshold Explorer
 # ==================================================================
 with tab_threshold:
     st.markdown("## 📈 Error Threshold Explorer")
@@ -738,11 +1538,8 @@ with tab_threshold:
 
     th_col1, th_col2 = st.columns([1, 2])
     with th_col1:
-        th_decoder  = st.selectbox("Decoder", ["mwpm", "union_find", "concat_mwpm"])
-        th_builder  = st.selectbox("Code family", [
-            "surface", "hexagonal", "walking", "iswap", "xyz2",
-            "color_code", "loom_color_code"
-        ])
+        th_decoder = st.selectbox("Decoder", get_decoder_names())
+        th_builder = st.selectbox("Code family", get_builder_names())
         th_quick    = st.checkbox("Quick sweep (fast, fewer shots)", value=True)
         th_distances = st.multiselect("Distances", [3, 5, 7, 9], default=[3, 5])
         th_run_btn  = st.button("Run threshold sweep", type="primary", width="stretch")
@@ -750,99 +1547,56 @@ with tab_threshold:
     with th_col2:
         th_chart = st.empty()
         th_info  = st.empty()
+        th_progress = st.progress(st.session_state.threshold_sweep_progress)
+        th_status = st.empty()
+
+    _poll_threshold_sweep_job()
 
     if th_run_btn:
-        try:
-            import stim  # noqa: F401
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            from surface_code_in_stem.rl_nested_learning import _logical_error_rate
-            from surface_code_in_stem.decoders import MWPMDecoder, UnionFindDecoder
-            from syndrome_net import CircuitSpec
-            from syndrome_net.container import get_container, reset_container
-
-            # Use syndrome_net plugin registry for circuit builders
-            reset_container()
-            container = get_container()
-            sn_builder = container.circuit_builders.get(th_builder)
-            decoder_map = {"mwpm": MWPMDecoder(), "union_find": UnionFindDecoder()}
-            decoder = decoder_map[th_decoder]
-
+        if st.session_state.threshold_sweep_job is not None:
+            th_info.warning("A threshold sweep is already running.")
+        else:
             p_values = np.linspace(0.003, 0.018, 7) if th_quick else np.linspace(0.001, 0.020, 13)
-            shots    = 256 if th_quick else 2048
-            n_workers = min(8, len(th_distances) * len(p_values))
-
-            def _run_one(d: int, p_val: float) -> tuple[int, float, float]:
-                spec = CircuitSpec(distance=d, rounds=d, error_probability=float(p_val))
-                circuit = sn_builder.build(spec)
-                circ_str = str(circuit)
-                ler = _logical_error_rate(circ_str, shots=shots, seed=7, decoder=decoder)
-                return d, float(p_val), float(ler)
-
-            data: dict[int, list[tuple[float, float]]] = {d: [] for d in th_distances}
-            progress = st.progress(0.0)
-            status_text = st.empty()
-            total = len(th_distances) * len(p_values)
-            done  = 0
-
-            all_jobs = [(d, p_val) for d in sorted(th_distances) for p_val in p_values]
-
-            with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                futures = {pool.submit(_run_one, d, p_val): (d, p_val) for d, p_val in all_jobs}
-                for future in as_completed(futures):
-                    d_key, p_val_done, ler_val = future.result()
-                    data[d_key].append((p_val_done, ler_val))
-                    done += 1
-                    progress.progress(done / total)
-                    status_text.caption(
-                        f"⚡ Parallel sweep: {done}/{total} complete "
-                        f"(d={d_key}, p={p_val_done:.4f} → p_L={ler_val:.4f})"
-                    )
-                    # Live chart update every 4 results
-                    if done % 4 == 0 or done == total:
-                        partial_data = {k: sorted(v) for k, v in data.items() if v}
-                        th_chart.plotly_chart(
-                            threshold_figure(
-                                partial_data,
-                                title=f"{th_builder.title()} — {th_decoder.upper()} (sweeping…)",
-                            ),
-                            width="stretch",
-                        )
-
-            progress.empty()
-            status_text.empty()
-
-            # Sort each distance curve by p
-            data = {k: sorted(v) for k, v in data.items()}
-
-            # Estimate threshold (first crossing between d[0] and d[1] curves)
-            thresh = None
-            dists = sorted(data.keys())
-            if len(dists) >= 2:
-                curve1 = data[dists[0]]
-                curve2 = data[dists[1]]
-                for i in range(len(curve1) - 1):
-                    p1,  l1  = curve1[i];    p1n, l1n = curve1[i + 1]
-                    _p2, l2  = curve2[i];    _,   l2n = curve2[i + 1]
-                    if (l1 - l2) * (l1n - l2n) < 0:
-                        thresh = (p1 + p1n) / 2
-                        break
-
-            fig = threshold_figure(
-                data,
-                threshold_p=thresh,
-                title=f"{th_builder.title()} code — {th_decoder.upper()} threshold",
+            shots = 256 if th_quick else 2048
+            _start_threshold_sweep_job(
+                distances=sorted(th_distances),
+                p_values=[float(x) for x in list(p_values)],
+                shots=shots,
+                builder=th_builder,
+                decoder=th_decoder,
+                seed=7,
             )
-            th_chart.plotly_chart(fig, width="stretch")
-            if thresh:
-                th_info.success(f"✅ Estimated threshold: **p_th ≈ {thresh:.4f}**")
-            else:
-                th_info.info("No crossing found — try more distances or a wider p range.")
 
-        except ImportError as exc:
-            th_info.error(f"Missing dependency: {exc}")
-        except Exception as exc:
-            th_info.error(f"Sweep failed: {exc}")
+    # While the background job is alive, keep the UI responsive by polling and rerunning.
+    if st.session_state.threshold_sweep_job is not None:
+        th_progress.progress(st.session_state.threshold_sweep_progress)
+        pct = float(st.session_state.threshold_sweep_progress) * 100
+        th_status.info(f"Sweeping threshold space: {pct:.1f}% complete")
+        st.rerun()
 
+    if st.session_state.threshold_sweep_error is not None:
+        th_progress.empty()
+        th_status.empty()
+        th_info.error(f"Sweep failed: {st.session_state.threshold_sweep_error}")
+        st.session_state.threshold_sweep_error = None
+        st.session_state.threshold_sweep_done = False
+        st.session_state.threshold_sweep_data = None
+
+    data = st.session_state.threshold_sweep_data
+    if data:
+        # Estimate threshold (first crossing between d[0] and d[1] curves)
+        thresh = detect_threshold_crossing(data)
+
+        fig = threshold_figure(
+            data,
+            threshold_p=thresh,
+            title=f"{th_builder.title()} code — {th_decoder.upper()} threshold",
+        )
+        th_chart.plotly_chart(fig, width="stretch")
+        if thresh:
+            th_info.success(f"Estimated threshold: **p_th ≈ {thresh:.4f}**")
+        else:
+            th_status.info("Sweep finished; unable to estimate threshold from sampled points.")
 
 # ==================================================================
 # TAB 4 — Teraquop Footprint
@@ -867,9 +1621,8 @@ with tab_footprint:
         )
         families = st.multiselect(
             "Code families",
-            ["surface", "hexagonal", "walking", "iswap", "xyz2", "toric", "hypergraph_product",
-             "color_code", "loom_color_code"],
-            default=["surface", "hexagonal", "color_code"],
+            ["surface", "hexagonal", "walking", "iswap", "xyz2", "toric", "hypergraph_product"],
+            default=["surface", "hexagonal", "toric"],
         )
         fp_btn = st.button("Compute footprint", type="primary", width="stretch")
 
@@ -885,8 +1638,6 @@ with tab_footprint:
         "xyz2":               {"threshold": 1.2e-2, "prefactor": 0.15, "qubit_factor": 2.1},
         "toric":              {"threshold": 1.1e-2, "prefactor": 0.18, "qubit_factor": 2.0},
         "hypergraph_product": {"threshold": 2.5e-2, "prefactor": 0.20, "qubit_factor": 2.5},
-        "color_code":         {"threshold": 1.5e-2, "prefactor": 0.14, "qubit_factor": 2.0},  # Triangular colour code
-        "loom_color_code":    {"threshold": 1.5e-2, "prefactor": 0.14, "qubit_factor": 2.2},  # Loom hexagonal colour code
     }
 
     import math as _math
@@ -946,177 +1697,3 @@ with tab_footprint:
                 "Physical error rate is above threshold for all selected families — "
                 "error correction is not possible in this regime."
             )
-
-
-# ==================================================================
-# TAB 5 — Research Tracker
-# ==================================================================
-with tab_research:
-    st.markdown("## 📡 QEC Research Tracker")
-    st.markdown(
-        "Track quantum error correction papers and their implementation status. "
-        "Search arXiv for new techniques or manage the local paper database."
-    )
-
-    res_col1, res_col2 = st.columns([1, 2])
-
-    with res_col1:
-        st.markdown("### Paper database")
-        search_query = st.text_input("Search arXiv", placeholder="e.g. Floquet code surface")
-        fetch_btn = st.button("🔍 Search arXiv", use_container_width=True)
-        st.divider()
-        st.markdown("#### Implemented techniques")
-        implemented = {
-            "surface_code":        {"status": "✅ Complete", "file": "surface_code_in_stem/surface_code.py"},
-            "hexagonal_code":      {"status": "✅ Complete", "file": "surface_code_in_stem/dynamic/hexagonal.py"},
-            "walking_code":        {"status": "✅ Complete", "file": "surface_code_in_stem/dynamic/walking.py"},
-            "iswap_code":          {"status": "✅ Complete", "file": "surface_code_in_stem/dynamic/iswap.py"},
-            "xyz2_code":           {"status": "✅ Complete", "file": "surface_code_in_stem/dynamic/xyz2.py"},
-            "color_code_stim":     {"status": "✅ Complete", "file": "syndrome_net/codes.py (ColorCodeStimBuilder)"},
-            "loom_color_code":     {"status": "✅ Complete", "file": "syndrome_net/codes.py (LoomColorCodeBuilder)"},
-            "concat_mwpm_decoder": {"status": "✅ Complete", "file": "syndrome_net/decoders.py (ConcatenatedMWPMDecoder)"},
-            "mwpm_decoder":        {"status": "✅ Complete", "file": "syndrome_net/decoders.py"},
-            "floquet_code":        {"status": "🔧 In Progress", "file": "surface_code_in_stem/dynamic/floquet.py"},
-            "ldpc_codes":          {"status": "📋 Planned", "file": "syndrome_net/codes.py"},
-            "neural_decoder":      {"status": "📋 Planned", "file": "syndrome_net/decoders.py"},
-        }
-        for tech, info in implemented.items():
-            st.markdown(
-                f"**{tech}** — {info['status']}  \n"
-                f"<small>`{info['file']}`</small>",
-                unsafe_allow_html=True
-            )
-
-    with res_col2:
-        st.markdown("### Key papers")
-        papers = [
-            {
-                "title": "High-threshold and low-overhead fault-tolerant quantum memory",
-                "authors": "Seok-Hyung Lee, Benjamin J. Brown",
-                "year": 2025,
-                "arxiv": "2503.09704",
-                "relevance": "⭐⭐⭐⭐⭐ Colour code breakthrough",
-                "status": "✅ Implemented (color-code-stim, concat-MWPM)",
-            },
-            {
-                "title": "Loom: A quantum error correction lattice surgery tool",
-                "authors": "Entropica Labs",
-                "year": 2024,
-                "arxiv": "2404.08663",
-                "relevance": "⭐⭐⭐⭐ Colour code circuits via el-loom",
-                "status": "✅ Implemented (LoomColorCodeBuilder)",
-            },
-            {
-                "title": "Stim: a fast stabilizer circuit simulator",
-                "authors": "Craig Gidney",
-                "year": 2021,
-                "arxiv": "2103.02202",
-                "relevance": "⭐⭐⭐⭐⭐ Core tool",
-                "status": "✅ Used",
-            },
-            {
-                "title": "Dynamically Generated Logical Qubits (Floquet codes)",
-                "authors": "Hastings, Haah",
-                "year": 2021,
-                "arxiv": "2107.02194",
-                "relevance": "⭐⭐⭐⭐⭐ High impact",
-                "status": "🔧 In Progress",
-            },
-            {
-                "title": "Morvan et al. — Dynamic Surface Codes",
-                "authors": "Morvan et al.",
-                "year": 2025,
-                "arxiv": "2412.14256",
-                "relevance": "⭐⭐⭐⭐ Direct inspiration",
-                "status": "✅ Implemented (hex/walking/iswap)",
-            },
-            {
-                "title": "Tailoring Floquet codes for biased noise (X3Z3)",
-                "authors": "Davydova et al.",
-                "year": 2024,
-                "arxiv": "2211.14796",
-                "relevance": "⭐⭐⭐⭐ High interest",
-                "status": "📋 Planned",
-            },
-            {
-                "title": "Fault-tolerant hyperbolic Floquet codes",
-                "authors": "Fahimniya et al.",
-                "year": 2025,
-                "arxiv": "2309.10033",
-                "relevance": "⭐⭐⭐⭐ 5x qubit efficiency",
-                "status": "📋 Planned",
-            },
-            {
-                "title": "Distributed QEC based on hyperbolic Floquet codes",
-                "authors": "Sutcliffe et al.",
-                "year": 2025,
-                "arxiv": "2501.14029",
-                "relevance": "⭐⭐⭐ Distributed QEC",
-                "status": "📋 Planned",
-            },
-            {
-                "title": "PyMatching: A fast implementation of the Blossom algorithm",
-                "authors": "Higgott",
-                "year": 2022,
-                "arxiv": "2105.13082",
-                "relevance": "⭐⭐⭐⭐⭐ Core decoder",
-                "status": "✅ Used",
-            },
-        ]
-
-        if fetch_btn and search_query:
-            st.info(f"Searching arXiv for: **{search_query}** …")
-            try:
-                import feedparser, re, urllib.parse
-                q = urllib.parse.quote(search_query)
-                url = f"https://export.arxiv.org/api/query?search_query=cat:quant-ph+AND+{q}&max_results=5&sortBy=submittedDate&sortOrder=descending"
-                feed = feedparser.parse(url)
-                if feed.entries:
-                    st.success(f"Found {len(feed.entries)} recent papers:")
-                    for entry in feed.entries[:5]:
-                        arxiv_id = re.search(r"(\d+\.\d+)", entry.id)
-                        arxiv_id = arxiv_id.group(1) if arxiv_id else "?"
-                        st.markdown(
-                            f"**{entry.title}**  \n"
-                            f"{', '.join(a.get('name','') for a in entry.get('authors',[])[:3])}  \n"
-                            f"[arXiv:{arxiv_id}](https://arxiv.org/abs/{arxiv_id})",
-                            unsafe_allow_html=False
-                        )
-                else:
-                    st.info("No results found.")
-            except Exception as exc:
-                st.warning(f"arXiv search requires `feedparser`: {exc}")
-
-        st.markdown("#### Tracked papers")
-        for paper in papers:
-            with st.expander(f"{paper['status']} [{paper['year']}] {paper['title'][:60]}…"):
-                st.markdown(
-                    f"**Authors:** {paper['authors']}  \n"
-                    f"**Year:** {paper['year']}  \n"
-                    f"**arXiv:** [{paper['arxiv']}](https://arxiv.org/abs/{paper['arxiv']})  \n"
-                    f"**Relevance:** {paper['relevance']}  \n"
-                    f"**Status:** {paper['status']}"
-                )
-
-        st.divider()
-        st.markdown("#### Architecture status")
-        arch_items = {
-            "syndrome_net protocols (CircuitBuilder, Decoder, NoiseModel, Visualizer)": "✅",
-            "Plugin registry system (Registry[T])": "✅",
-            "Dependency injection container (DIContainer)": "✅",
-            "Parallel threshold sweep (ThreadPoolExecutor)": "✅",
-            "Colour code circuit builders (color-code-stim, el-loom)": "✅",
-            "Concatenated MWPM decoder for colour codes": "✅",
-            "Colour code RL environments (Gym/Discovery/Calibration)": "✅",
-            "Colour code lattice visualization": "✅",
-            "Circuit caching layer (LRU)": "✅",
-            "PyMatching MWPM decoder integration": "✅",
-            "RL live fragment (@st.fragment run_every=0.15)": "✅",
-            "GitHub Actions CI with colour code matrix": "✅",
-            "Floquet honeycomb code builder": "🔧",
-            "LDPC code builder (pyldpc)": "📋",
-            "Neural decoder (PyTorch/JAX)": "📋",
-            "Async RL training (JAX vmap)": "📋",
-        }
-        for item, status in arch_items.items():
-            st.markdown(f"{status} {item}")
