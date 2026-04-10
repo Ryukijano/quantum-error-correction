@@ -2,6 +2,7 @@
 
 Provides:
 - Stim circuit SVG via circuit.diagram()
+- Stim matchgraph HTML via diagram('matchgraph-3d-html') fallback
 - Plotly syndrome heatmaps
 - Detector graph network plots
 - RL metrics time-series panels
@@ -78,6 +79,33 @@ def circuit_interactive_html(circuit: "stim.Circuit") -> str:
     if not HAS_STIM:
         return "<p>stim not installed</p>"
     return str(circuit.diagram("interactive-html"))
+
+
+def circuit_matchgraph_html(
+    circuit: "stim.Circuit",
+    diagram_type: str = "matchgraph-3d-html",
+) -> str:
+    """Return a Stim matchgraph visualization HTML for backend diagnostics.
+
+    `diagram_type` can be switched to fallback options if the renderer doesn't
+    support the preferred output.
+    """
+    if not HAS_STIM:
+        return "<p>stim not installed</p>"
+
+    candidates = (diagram_type, "matchgraph-3d-html", "matchgraph-3d-svg", "matchgraph-svg")
+    last_error: Exception | None = None
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return str(circuit.diagram(candidate))
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error is None:
+        return "<p>matchgraph unavailable</p>"
+    return f"<p>matchgraph unavailable: {last_error}</p>"
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +314,7 @@ def rl_metrics_panel(
 
     rewards   = [h.get("reward", 0.0) for h in history]
     rl_succ   = [h.get("rl_success", 0.0) for h in history]
+    rl_iqm    = [h.get("rl_success_iqm", v) for v, h in zip(rl_succ, history)]
     mw_succ   = [h.get("mwpm_success", 0.0) for h in history]
     ler       = [h.get("logical_error_rate", 0.0) for h in history]
 
@@ -330,6 +359,14 @@ def rl_metrics_panel(
         mode="lines", name="MWPM baseline",
         line=dict(color=PALETTE["orange"], width=2, dash="dash"),
     ), row=2, col=1)
+    if any(v for v in rl_iqm):
+        fig.add_trace(go.Scatter(
+            x=episodes,
+            y=rl_iqm,
+            mode="lines",
+            name="RL (IQM)",
+            line=dict(color=PALETTE["purple"], width=2.2, dash="dot"),
+        ), row=2, col=1)
 
     # Styling
     fig.update_layout(
@@ -346,6 +383,114 @@ def rl_metrics_panel(
     fig.update_xaxes(title_text="Episode", row=2, col=1)
     fig.update_yaxes(title_text="Reward", row=1, col=1)
     fig.update_yaxes(title_text="Success rate", range=[0, 1.05], row=2, col=1)
+    return fig
+
+
+def policy_diagnostics_panel(
+    history: list[dict],
+    window: int = 10,
+    title: str = "Policy diagnostics",
+) -> go.Figure:
+    """Panel for PPO/SAC optimization diagnostics (loss curves + entropy/alpha traces)."""
+    if not history:
+        return go.Figure(layout=dict(**PLOTLY_LAYOUT, title=title))
+
+    episodes = [h.get("episode", i + 1) for i, h in enumerate(history)]
+    policy_loss = [float(h.get("policy_loss", 0.0) or 0.0) for h in history]
+    value_loss = [float(h.get("value_loss", 0.0) or 0.0) for h in history]
+    alpha_loss = [float(h.get("alpha_loss", 0.0) or 0.0) for h in history]
+    alpha = [float(h.get("alpha", 0.0) or 0.0) for h in history]
+    updates = [float(h.get("policy_updates", 0.0) or 0.0) for h in history]
+    sigma_mean = [float(h.get("sigma_mean", 0.0) or 0.0) for h in history]
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.12,
+        subplot_titles=["Policy/value/alpha-loss", "Entropy alpha + updates"],
+    )
+
+    def smooth(arr, w):
+        if len(arr) < w:
+            return arr
+        return np.convolve(arr, np.ones(w) / w, mode="valid").tolist()
+
+    if any(v != 0.0 for v in policy_loss):
+        fig.add_trace(go.Scatter(
+            x=episodes,
+            y=policy_loss,
+            mode="lines",
+            name="policy_loss",
+            line=dict(color=PALETTE["sky"], width=2),
+        ), row=1, col=1)
+        if len(policy_loss) >= window:
+            fig.add_trace(go.Scatter(
+                x=episodes[window - 1:],
+                y=smooth(policy_loss, window),
+                mode="lines",
+                name=f"policy_loss MA-{window}",
+                line=dict(color=PALETTE["sky"], width=2.8),
+            ), row=1, col=1)
+
+    if any(v != 0.0 for v in value_loss):
+        fig.add_trace(go.Scatter(
+            x=episodes,
+            y=value_loss,
+            mode="lines",
+            name="value_loss",
+            line=dict(color=PALETTE["orange"], width=2),
+        ), row=1, col=1)
+
+    if any(v != 0.0 for v in alpha_loss):
+        fig.add_trace(go.Scatter(
+            x=episodes,
+            y=alpha_loss,
+            mode="lines",
+            name="alpha_loss",
+            line=dict(color=PALETTE["purple"], width=2),
+        ), row=2, col=1)
+    if any(v != 0.0 for v in alpha):
+        fig.add_trace(go.Scatter(
+            x=episodes,
+            y=alpha,
+            mode="lines",
+            name="alpha",
+            line=dict(color=PALETTE["green"], width=2, dash="dot"),
+        ), row=2, col=1)
+    if any(v != 0.0 for v in updates):
+        fig.add_trace(go.Scatter(
+            x=episodes,
+            y=updates,
+            mode="lines",
+            name="policy_updates",
+            line=dict(color=PALETTE["red"], width=2),
+            opacity=0.6,
+        ), row=2, col=1)
+    if any(v != 0.0 for v in sigma_mean):
+        fig.add_trace(go.Scatter(
+            x=episodes,
+            y=sigma_mean,
+            mode="lines",
+            name="sigma_mean",
+            line=dict(color=PALETTE["yellow"], width=2, dash="dash"),
+            opacity=0.8,
+        ), row=2, col=1)
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=17, color="#a8d8ff")),
+        paper_bgcolor=PLOTLY_LAYOUT["paper_bgcolor"],
+        plot_bgcolor=PLOTLY_LAYOUT["plot_bgcolor"],
+        font=PLOTLY_LAYOUT["font"],
+        legend=PLOTLY_LAYOUT["legend"],
+        margin=PLOTLY_LAYOUT["margin"],
+        height=440,
+    )
+    for axis in ["xaxis", "xaxis2", "yaxis", "yaxis2"]:
+        fig.update_layout(**{axis: dict(gridcolor="#2a2f4a", zerolinecolor="#3a3f5c")})
+    fig.update_xaxes(title_text="Episode", row=2, col=1)
+    fig.update_yaxes(title_text="Loss / alpha", row=1, col=1)
+    fig.update_yaxes(title_text="Aux diagnostics", row=2, col=1)
     return fig
 
 

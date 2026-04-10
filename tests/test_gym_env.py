@@ -2,11 +2,13 @@
 
 import pytest
 import numpy as np
+from typing import Any
 
-pytest.importorskip("gym")
+pytest.importorskip("gymnasium")
 stim = pytest.importorskip("stim")
 
 from surface_code_in_stem.rl_control.gym_env import QECGymEnv, QECContinuousControlEnv
+from surface_code_in_stem.decoders import DecoderOutput
 
 
 def test_qec_gym_env_initialization():
@@ -36,6 +38,50 @@ def test_qec_gym_env_step():
     assert truncated is False
     assert "actual_logical" in info
     assert "is_correct" in info
+
+
+def test_qec_gym_env_uses_requested_decoder(monkeypatch):
+    class FakeDecoder:
+        name = "mock_decoder"
+
+        def decode(self, detector_events: Any, metadata: Any) -> DecoderOutput:
+            predictions = np.zeros((1, metadata.num_observables), dtype=np.int8)
+            return DecoderOutput(
+                logical_predictions=predictions,
+                decoder_name=self.name,
+                diagnostics={"source": "mock"},
+            )
+
+    class FakeContainer:
+        def get_decoder(self, name: str) -> object:
+            assert name == "mock_decoder"
+            return FakeDecoder()
+
+    monkeypatch.setattr(
+        "syndrome_net.container.get_container",
+        lambda: FakeContainer(),
+    )
+    env = QECGymEnv(distance=3, rounds=2, physical_error_rate=0.01, decoder_name="mock_decoder")
+    _, info = env.reset(seed=4)
+    assert info["baseline_decoder_requested"] == "mock_decoder"
+    assert info["baseline_decoder"] == "mock_decoder"
+    assert isinstance(info["mwpm_prediction"], np.ndarray)
+    assert info["mwpm_prediction"].shape[0] == env.num_observables
+
+
+def test_qec_gym_env_falls_back_to_mwpm_when_decoder_missing(monkeypatch):
+    class FakeContainer:
+        def get_decoder(self, name: str) -> object:
+            raise KeyError(name)
+
+    monkeypatch.setattr(
+        "syndrome_net.container.get_container",
+        lambda: FakeContainer(),
+    )
+    env = QECGymEnv(distance=3, rounds=2, physical_error_rate=0.01, decoder_name="missing_decoder")
+    _, info = env.reset(seed=5)
+    assert info["baseline_decoder_requested"] == "missing_decoder"
+    assert info["baseline_decoder"] == "mwpm"
 
 
 def test_qec_continuous_control_env():

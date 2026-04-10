@@ -1,0 +1,17 @@
+# Deterministic dependency lock layer for the syndrome-net root runtime.
+# Keep this file as the canonical source for CI/test installs.
+
+numpy==1.26.4
+stim==1.15.0
+qiskit==1.0.2
+qiskit-aer==0.14.2
+torch==2.2.0
+gymnasium==0.29.1
+streamlit==1.35.0
+plotly==5.22.0
+pandas==2.2.0
+pytest==8.4.1
+maturin==1.8.3
+ruff==0.11.7
+pymatching==2.2.1
+

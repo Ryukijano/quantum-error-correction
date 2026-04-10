@@ -251,6 +251,15 @@ class ColorCodeStimBuilder(CircuitBuilder):
     @property
     def supported_distances(self) -> list[int]:
         return [3, 5, 7, 9, 11, 13]
+
+    @staticmethod
+    def is_available() -> bool:
+        """Return True when optional color-code-stim dependency is importable."""
+        try:
+            import color_code_stim  # noqa: F401
+        except Exception:
+            return False
+        return True
     
     def build(self, spec: CircuitSpec) -> stim.Circuit:
         """Build a colour code Stim circuit.
@@ -309,6 +318,15 @@ class LoomColorCodeBuilder(CircuitBuilder):
     @property
     def name(self) -> str:
         return "loom_color_code"
+
+    @staticmethod
+    def is_available() -> bool:
+        """Return True when optional loom dependency is importable."""
+        try:
+            import loom  # noqa: F401
+        except Exception:
+            return False
+        return True
     
     @property
     def supported_distances(self) -> list[int]:
@@ -446,7 +464,17 @@ class LoomColorCodeBuilder(CircuitBuilder):
         interpreted = interpret_eka(eka)
         
         # interpret_eka returns a Stim circuit string or object
-        circuit_str = interpreted.final_circuit
-        if isinstance(circuit_str, str):
-            return stim.Circuit(circuit_str)
-        return circuit_str
+        circuit_output = interpreted.final_circuit
+        if isinstance(circuit_output, stim.Circuit):
+            return circuit_output
+        if isinstance(circuit_output, str):
+            return stim.Circuit(circuit_output)
+
+        try:
+            from loom.executor.eka_to_stim_converter import EkaToStimConverter
+
+            return EkaToStimConverter().convert(circuit_output)
+        except Exception as exc:
+            raise TypeError(
+                "Loom interpret_eka output type is not directly supported by stim.Circuit"
+            ) from exc

@@ -5,8 +5,13 @@ enabling loose coupling and easier testing.
 """
 from __future__ import annotations
 
-from typing import Any, TypeVar, Callable
-from dataclasses import dataclass, field
+from importlib.metadata import EntryPoint, entry_points
+from typing import Any, Callable, Iterable, Iterator, TypeVar
+from dataclasses import dataclass
+import logging
+_LOGGER = logging.getLogger(__name__)
+
+
 
 from syndrome_net import CircuitBuilder, Decoder, NoiseModel, Visualizer
 from syndrome_net.registry import (
@@ -17,6 +22,162 @@ from syndrome_net.registry import (
 )
 
 T = TypeVar("T")
+
+_CIRCUIT_BUILDER_ENTRYPOINT_GROUP = "syndrome_net.circuit_builders"
+_DECODER_ENTRYPOINT_GROUP = "syndrome_net.decoders"
+
+
+def _iter_entry_points(group: str) -> Iterable[EntryPoint]:
+    """Return entry-point definitions for discovery while handling unsupported runtimes."""
+    try:
+        points = entry_points()
+    except Exception as exc:
+        _LOGGER.warning("Unable to enumerate entry points for %s: %s", group, exc)
+        if __debug__:
+            _LOGGER.debug("Error enumerating entry points for %s", group, exc_info=True)
+        return ()
+
+    if hasattr(points, "select"):
+        try:
+            raw_points = tuple(points.select(group=group))
+        except Exception as exc:  # pragma: no cover - compatibility fallback
+            _LOGGER.warning("Failed to select entry points for %s: %s", group, exc)
+            if __debug__:
+                _LOGGER.debug("Error selecting entry points for %s", group, exc_info=True)
+            return ()
+        try:
+            return tuple(sorted(raw_points, key=lambda point: point.name))
+        except Exception as exc:  # pragma: no cover - compatibility fallback
+            _LOGGER.warning("Unable to sort discovered entry points for %s: %s", group, exc)
+            if __debug__:
+                _LOGGER.debug("Error sorting entry points for %s", group, exc_info=True)
+            return raw_points
+
+    try:
+        discovered = tuple(points.get(group, ()))
+    except Exception as exc:  # pragma: no cover - compatibility fallback
+        _LOGGER.warning("Unable to read entry points for %s: %s", group, exc)
+        if __debug__:
+            _LOGGER.debug("Error reading entry points for %s", group, exc_info=True)
+        return ()
+
+    try:
+        return tuple(sorted(discovered, key=lambda point: point.name))
+    except Exception as exc:  # pragma: no cover - compatibility fallback
+        _LOGGER.warning("Unable to sort discovered entry points for %s: %s", group, exc)
+        if __debug__:
+            _LOGGER.debug("Error sorting entry points for %s", group, exc_info=True)
+        return discovered
+
+
+def _safe_optional_component_available(
+    component_name: str,
+    available: Callable[[], bool],
+) -> bool:
+    """Probe optional-component availability with robust fallback logging."""
+    try:
+        return bool(available())
+    except Exception as exc:
+        _LOGGER.warning("Unable to probe optional component '%s': %s", component_name, exc)
+        if __debug__:
+            _LOGGER.debug("Optional component probe failure", exc_info=True)
+        return False
+
+
+def _materialize_component(component_factory: object) -> Any:
+    """Create a component instance from a builder-like object."""
+    if isinstance(component_factory, type):
+        return component_factory()
+
+    if callable(component_factory):
+        return component_factory()
+
+    return component_factory
+
+
+def _iter_discovered_circuit_builders() -> Iterator[tuple[str, Any]]:
+    """Yield (name, builder_instance) pairs from entry-point discovery."""
+    for point in _iter_entry_points(_CIRCUIT_BUILDER_ENTRYPOINT_GROUP):
+        try:
+            loaded = point.load()
+        except Exception as exc:
+            _LOGGER.warning(
+                "Skipping circuit-builder entry point '%s' (%s): %s",
+                point.name,
+                _CIRCUIT_BUILDER_ENTRYPOINT_GROUP,
+                exc,
+            )
+            if __debug__:
+                _LOGGER.debug("Error loading circuit-builder entry point", exc_info=True)
+            continue
+
+        try:
+            yield point.name, _materialize_component(loaded)
+        except Exception as exc:  # pragma: no cover - defensive, exercised via tests
+            _LOGGER.warning("Skipping circuit-builder '%s': %s", point.name, exc)
+            if __debug__:
+                _LOGGER.debug("Error materializing circuit-builder entry point", exc_info=True)
+
+
+def _iter_discovered_decoders() -> Iterator[tuple[str, Any]]:
+    """Yield (name, decoder_instance) pairs from entry-point discovery."""
+    for point in _iter_entry_points(_DECODER_ENTRYPOINT_GROUP):
+        try:
+            loaded = point.load()
+        except Exception as exc:
+            _LOGGER.warning(
+                "Skipping decoder entry point '%s' (%s): %s",
+                point.name,
+                _DECODER_ENTRYPOINT_GROUP,
+                exc,
+            )
+            if __debug__:
+                _LOGGER.debug("Error loading decoder entry point", exc_info=True)
+            continue
+
+        try:
+            yield point.name, _materialize_component(loaded)
+        except Exception as exc:  # pragma: no cover - defensive
+            _LOGGER.warning("Skipping decoder '%s': %s", point.name, exc)
+            if __debug__:
+                _LOGGER.debug("Error materializing decoder entry point", exc_info=True)
+
+
+def _is_valid_circuit_builder(candidate: object) -> bool:
+    """Return True when a candidate can be registered as a circuit builder."""
+    return (
+        hasattr(candidate, "name")
+        and hasattr(candidate, "build")
+        and hasattr(candidate, "supported_distances")
+        and callable(candidate.build)
+    )
+
+
+def _is_valid_decoder(candidate: object) -> bool:
+    return (
+        hasattr(candidate, "name")
+        and hasattr(candidate, "decode")
+        and callable(candidate.decode)
+    )
+
+
+def _register_optional_builder(
+    registry: "CircuitBuilderRegistry",
+    name: str,
+    factory: Callable[[], Any],
+    *,
+    fallback_message: str,
+) -> None:
+    """Register a builder if available; otherwise log a warning and continue."""
+    try:
+        registry.register(name, factory())
+        return
+    except Exception as exc:
+        _LOGGER.warning("%s: %s", fallback_message, exc)
+        if __debug__:
+            _LOGGER.debug(
+                "%s builder details", fallback_message.lower().replace(" ", "_"), exc_info=True
+            )
 
 
 @dataclass
@@ -100,9 +261,17 @@ class DIContainer:
             ColorCodeStimBuilder,
             LoomColorCodeBuilder,
         )
-        from syndrome_net.decoders import MWPMDecoder, UnionFindDecoder
+        from surface_code_in_stem.decoders import (
+            CudaQDecoder,
+            CuQNNBackendAdapterDecoder,
+            MWPMDecoder,
+            JAXConfidenceDecoderAdapter,
+            SparseBlossomDecoder,
+            QuJaxNeuralBPDecoder,
+            UnionFindDecoder,
+        )
         from syndrome_net.noise import IIDDepolarizingModel, BiasedNoiseModel
-        from syndrome_net.visualizers import PlotlyVisualizer, SVGVisualizer
+        from syndrome_net.visualizers import CrumbleVisualizer, PlotlyVisualizer, SVGVisualizer
         
         # Circuit builders
         self._circuit_builders.register("surface", SurfaceCodeBuilder())
@@ -110,20 +279,101 @@ class DIContainer:
         self._circuit_builders.register("walking", WalkingCodeBuilder())
         self._circuit_builders.register("iswap", ISwapCodeBuilder())
         self._circuit_builders.register("xyz2", XYZ2HexagonalBuilder())
+
+        # Colour code builders (graceful fallback if optional dependencies are missing)
+        if _safe_optional_component_available(
+            component_name="color-code-stim builder",
+            available=ColorCodeStimBuilder.is_available,
+        ):
+            _register_optional_builder(
+                self._circuit_builders,
+                "color_code",
+                ColorCodeStimBuilder,
+                fallback_message="color-code-stim builder unavailable",
+            )
+        else:
+            _LOGGER.warning("color-code-stim builder unavailable because dependency is missing")
+
+        if _safe_optional_component_available(
+            component_name="el-loom builder",
+            available=LoomColorCodeBuilder.is_available,
+        ):
+            _register_optional_builder(
+                self._circuit_builders,
+                "loom_color_code",
+                LoomColorCodeBuilder,
+                fallback_message="el-loom builder unavailable",
+            )
+        else:
+            _LOGGER.warning("el-loom builder unavailable because dependency is missing")
+
+        # Dynamically discovered circuit builders from plugin entry points.
+        for builder_name, builder in sorted(
+            _iter_discovered_circuit_builders(),
+            key=lambda item: item[0],
+        ):
+            if not _is_valid_circuit_builder(builder):
+                _LOGGER.warning(
+                    "Skipping invalid circuit-builder entry point '%s': missing CircuitBuilder interface",
+                    builder_name,
+                )
+                if __debug__:
+                    _LOGGER.debug("Invalid circuit-builder candidate: %r", builder)
+                continue
+
+            try:
+                self._circuit_builders.register(builder_name, builder)
+            except Exception as exc:
+                _LOGGER.warning("Skipping circuit-builder '%s': %s", builder_name, exc)
+                if __debug__:
+                    _LOGGER.debug("Error registering dynamic circuit builder", exc_info=True)
         
-        # Colour code builders (graceful if deps missing)
-        try:
-            self._circuit_builders.register("color_code", ColorCodeStimBuilder())
-        except Exception:  # color-code-stim not installed
-            pass
-        try:
-            self._circuit_builders.register("loom_color_code", LoomColorCodeBuilder())
-        except Exception:  # el-loom not installed
-            pass
-        
-        # Decoders
-        self._decoders.register("mwpm", MWPMDecoder())
-        self._decoders.register("union_find", UnionFindDecoder())
+        # Decoders discovered from plugin entry points.
+        for decoder_name, decoder in sorted(
+            _iter_discovered_decoders(),
+            key=lambda item: item[0],
+        ):
+            if decoder_name in self._decoders:
+                _LOGGER.debug(
+                    "Skipping duplicate decoder entry point '%s': already registered",
+                    decoder_name,
+                )
+                continue
+            if not _is_valid_decoder(decoder):
+                _LOGGER.warning(
+                    "Skipping invalid decoder entry point '%s': missing Decoder protocol",
+                    decoder_name,
+                )
+                if __debug__:
+                    _LOGGER.debug("Invalid decoder candidate: %r", decoder)
+                continue
+            try:
+                self._decoders.register(decoder_name, decoder)
+            except Exception as exc:
+                _LOGGER.warning("Skipping decoder '%s': %s", decoder_name, exc)
+                if __debug__:
+                    _LOGGER.debug("Error registering dynamic decoder", exc_info=True)
+
+        # Fallback defaults for built-in decoders (keeps behaviour stable if no
+        # plugin metadata is available in a runtime environment).
+        default_decoders = {
+            "mwpm": MWPMDecoder,
+            "union_find": UnionFindDecoder,
+            "sparse_blossom": SparseBlossomDecoder,
+            "cudaq": CudaQDecoder,
+            "qujax": QuJaxNeuralBPDecoder,
+            "cuqnn": CuQNNBackendAdapterDecoder,
+            "jax_confidence": JAXConfidenceDecoderAdapter,
+        }
+        for decoder_name, decoder_factory in default_decoders.items():
+            if decoder_name in self._decoders:
+                continue
+            try:
+                self._decoders.register(decoder_name, decoder_factory())
+            except Exception as exc:
+                _LOGGER.warning("Skipping default decoder '%s': %s", decoder_name, exc)
+                if __debug__:
+                    _LOGGER.debug("Error registering default decoder '%s'", decoder_name, exc_info=True)
         
         # Noise models
         self._noise_models.register("depolarizing", IIDDepolarizingModel())
@@ -132,6 +382,7 @@ class DIContainer:
         # Visualizers
         self._visualizers.register("plotly", PlotlyVisualizer())
         self._visualizers.register("svg", SVGVisualizer())
+        self._visualizers.register("crumble", CrumbleVisualizer())
     
     def get_builder(self, name: str | None = None) -> CircuitBuilder:
         """Get a circuit builder by name (or default).

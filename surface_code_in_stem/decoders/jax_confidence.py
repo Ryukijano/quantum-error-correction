@@ -7,10 +7,15 @@ efficient syndrome sequence modeling.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
+
+from .base import BoolArray, DecoderMetadata, DecoderOutput, DecoderProtocol
+from .union_find import UnionFindDecoder
 
 
 # Optional JAX imports with graceful fallback
@@ -32,6 +37,75 @@ try:
 except ImportError:
     HAS_FLASH_ATTN = False
     flash_attn_func = None
+
+
+_JAX_VERSION = getattr(jax, "__version__", "unknown") if HAS_JAX else "unknown"
+
+
+def _coerce_confidence_matrix(
+    metadata: DecoderMetadata,
+    events: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], bool, bool]:
+    extra = metadata.extra if isinstance(metadata.extra, Mapping) else {}
+    confidence: Any = extra.get("confidence") if isinstance(extra, Mapping) else None
+    if confidence is None:
+        confidence = extra.get("soft_information")
+    if confidence is None:
+        return np.ones_like(events, dtype=np.float64), False, False
+
+    confidence_array = np.asarray(confidence, dtype=np.float64)
+    if confidence_array.ndim != events.ndim:
+        raise ValueError("confidence must be a 2D tensor matching detector_events.")
+    if confidence_array.shape != events.shape:
+        raise ValueError(
+            "confidence shape must match detector_events shape "
+            f"(got {confidence_array.shape}, expected {events.shape})."
+        )
+
+    clipped = confidence_array
+    clipped_to_bounds = False
+    if np.any(np.isnan(clipped)):
+        clipped_to_bounds = True
+        clipped = np.nan_to_num(clipped, nan=1.0, posinf=1.0, neginf=0.0)
+    if np.any((clipped < 0.0) | (clipped > 1.0)):
+        clipped_to_bounds = True
+        clipped = np.clip(clipped, 0.0, 1.0)
+    return clipped, clipped_to_bounds, True
+
+
+def _build_fallback_decoder(metadata: DecoderMetadata, confidence_scale: float) -> Any:
+    from surface_code_in_stem.confidence_decoding import WeightedMWPMDecoder
+
+    if metadata.detector_error_model is None:
+        raise ValueError("JAXConfidenceDecoderAdapter requires detector_error_model for weighted matching fallback.")
+    return WeightedMWPMDecoder(metadata.detector_error_model, confidence_scale=confidence_scale)
+
+
+def _decode_with_adjusted_weights(
+    weighted_decoder: Any,
+    detector_events: NDArray[np.bool_],
+    adjusted_weights: NDArray[np.float64],
+) -> NDArray[np.bool_]:
+    base_graph = weighted_decoder._base_graph
+    edges_u: NDArray[np.integer[Any]] = np.asarray(weighted_decoder._edge_u, dtype=np.int64)
+    edges_v: NDArray[np.integer[Any]] = np.asarray(weighted_decoder._edge_v, dtype=np.int64)
+    edge_pairs = list(weighted_decoder._edge_pairs)
+    shots = detector_events.shape[0]
+
+    if adjusted_weights.shape != (shots, edges_u.shape[0]):
+        raise ValueError(
+            f"Adjusted-weight shape mismatch: expected ({shots}, {edges_u.shape[0]}), got {adjusted_weights.shape}"
+        )
+
+    matching_module = weighted_decoder._pymatching
+    predictions = np.zeros((shots, weighted_decoder._num_fault_ids), dtype=np.bool_)
+    for shot_ix in range(shots):
+        graph = base_graph.copy()
+        for weight_ix, (edge_u, edge_v) in enumerate(edge_pairs):
+            graph[int(edge_u)][int(edge_v)]["weight"] = float(adjusted_weights[shot_ix, weight_ix])
+        shot = np.asarray(detector_events[shot_ix], dtype=np.uint8)
+        predictions[shot_ix] = np.asarray(matching_module.Matching(graph).decode(shot), dtype=np.bool_)
+    return predictions
 
 
 class JAXConfidenceDecoder:
@@ -176,6 +250,165 @@ class JAXConfidenceDecoder:
 
         # Convert back to numpy
         return np.array(adjusted_weights)
+
+
+@dataclass
+class JAXConfidenceDecoderAdapter(DecoderProtocol):
+    """Backend-style adapter exposing `JAXConfidenceDecoder` through the decoder protocol."""
+
+    name: str = "jax_confidence"
+    confidence_scale: float = 1.0
+    use_flash_attn: bool = True
+    fallback_decoder: UnionFindDecoder = field(default_factory=UnionFindDecoder)
+    jax_decoder: Optional[JAXConfidenceDecoder] = field(default=None, init=False)
+    capabilities: tuple[str, ...] = ("jax", "confidence_aware", "backend_fallback")
+
+    def __post_init__(self) -> None:
+        if HAS_JAX:
+            self.jax_decoder = JAXConfidenceDecoder(
+                confidence_scale=self.confidence_scale,
+                use_flash_attn=self.use_flash_attn,
+            )
+
+    def _diagnostic_metadata(self) -> dict[str, Any]:
+        return {
+            "backend_id": self.name,
+            "backend": self.name,
+            "backend_available": HAS_JAX,
+            "backend_enabled": HAS_JAX and self.jax_decoder is not None,
+            "backend_version": _JAX_VERSION,
+            "capabilities": list(self.capabilities),
+            "backend_contract": HAS_JAX,
+        }
+
+    def decode(self, detector_events: BoolArray, metadata: DecoderMetadata) -> DecoderOutput:
+        events = np.asarray(detector_events, dtype=np.bool_)
+        if events.ndim != 2:
+            raise ValueError("detector_events must be a 2D bool array.")
+
+        start_ns = time.perf_counter_ns()
+        diagnostics = self._diagnostic_metadata()
+        diagnostics.update(
+            {
+                "backend_chain": [f"requested:{self.name}"],
+                "fallback_chain": [f"requested:{self.name}"],
+                "contract_flags": "backend_disabled,contract_fallback",
+                "profiler_flags": "trace_chain_recorded",
+                "degraded": bool(not HAS_JAX),
+            }
+        )
+
+        confidence, confidence_was_clipped, confidence_provided = _coerce_confidence_matrix(metadata, events.astype(np.float64))
+        details: dict[str, Any] = {
+            "has_flash_attention": HAS_FLASH_ATTN,
+            "confidence_provided": confidence_provided,
+            "confidence_was_clipped": confidence_was_clipped,
+            "num_shots": int(events.shape[0]),
+            "num_detectors": int(events.shape[1]),
+            "num_observables": int(metadata.num_observables),
+        }
+
+        if confidence.size == 0:
+            details["outcome"] = "empty_input"
+            diagnostics.update(
+                {
+                    "backend_error": None,
+                    "backend_chain": diagnostics["backend_chain"] + [f"selected:{self.name}"],
+                    "fallback_chain": diagnostics["fallback_chain"] + [f"selected:{self.name}"],
+                    "contract_flags": "backend_enabled,contract_met",
+                    "degraded": False,
+                    "fallback_reason": None,
+                    "details": details,
+                }
+            )
+            return DecoderOutput(
+                logical_predictions=np.zeros((0, metadata.num_observables), dtype=np.bool_),
+                decoder_name=self.name,
+                diagnostics=diagnostics,
+            )
+
+        if not HAS_JAX or self.jax_decoder is None:
+            details["outcome"] = "fallback_no_jax"
+            fallback_output = self.fallback_decoder.decode(events, metadata)
+            fallback_diagnostics = dict(fallback_output.diagnostics)
+            latency_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+            diagnostics.update(fallback_diagnostics)
+            diagnostics.update(
+                {
+                    "backend_error": "JAX not available",
+                    "fallback_reason": "JAX backend unavailable",
+                    "backend_chain": diagnostics["backend_chain"] + ["backend_fallback"],
+                    "fallback_chain": diagnostics["fallback_chain"] + ["backend_fallback"],
+                    "contract_flags": "backend_disabled,contract_fallback",
+                    "degraded": True,
+                    "latency_ms": latency_ms,
+                    "details": details,
+                }
+            )
+            return DecoderOutput(
+                logical_predictions=fallback_output.logical_predictions,
+                decoder_name=self.name,
+                diagnostics=diagnostics,
+            )
+
+        try:
+            weighted_decoder = _build_fallback_decoder(metadata, self.confidence_scale)
+            adjusted_weights = self.jax_decoder.decode_batch(
+                hard_bits=np.asarray(events, dtype=np.float64),
+                confidence=confidence.astype(np.float64),
+                base_weights=np.asarray(weighted_decoder._base_weights, dtype=np.float64),
+                edge_u=np.asarray(weighted_decoder._edge_u, dtype=np.int64),
+                edge_v=np.asarray(weighted_decoder._edge_v, dtype=np.int64),
+                u_is_det=np.asarray(weighted_decoder._u_is_det, dtype=np.bool_),
+                v_is_det=np.asarray(weighted_decoder._v_is_det, dtype=np.bool_),
+            )
+            predictions = _decode_with_adjusted_weights(
+                weighted_decoder=weighted_decoder,
+                detector_events=np.asarray(events, dtype=np.bool_),
+                adjusted_weights=np.asarray(adjusted_weights, dtype=np.float64),
+            )
+            details["outcome"] = "backend_jax_success"
+            diagnostics.update(
+                {
+                    "backend_error": None,
+                    "backend_chain": diagnostics["backend_chain"] + [f"selected:{self.name}"],
+                    "fallback_chain": diagnostics["fallback_chain"] + [f"selected:{self.name}"],
+                    "contract_flags": "backend_enabled,contract_met",
+                    "degraded": False,
+                    "fallback_reason": None,
+                    "details": details,
+                }
+            )
+        except Exception as exc:
+            details["outcome"] = "backend_jax_failed"
+            details["backend_failure"] = str(exc)
+            fallback_output = self.fallback_decoder.decode(events, metadata)
+            diagnostics.update(
+                {
+                    "backend_error": str(exc),
+                    "fallback_reason": str(exc),
+                    "backend_chain": diagnostics["backend_chain"] + ["backend_fallback"],
+                    "fallback_chain": diagnostics["fallback_chain"] + ["backend_fallback"],
+                    "contract_flags": "backend_disabled,contract_fallback",
+                    "degraded": True,
+                    "details": details,
+                }
+            )
+            diagnostics["profiler_flags"] = ",".join([f for f in diagnostics["profiler_flags"].split(",") if f] + ["fallback_used"])
+            latency_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+            diagnostics["latency_ms"] = latency_ms
+            return DecoderOutput(
+                logical_predictions=fallback_output.logical_predictions,
+                decoder_name=self.name,
+                diagnostics=diagnostics,
+            )
+        latency_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+        diagnostics["latency_ms"] = latency_ms
+        return DecoderOutput(
+            logical_predictions=np.asarray(predictions, dtype=np.bool_),
+            decoder_name=self.name,
+            diagnostics=diagnostics,
+        )
 
 
 class FlashAttentionSyndromeModel:
