@@ -3,6 +3,7 @@ name: tests
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   pytest:
@@ -23,6 +24,29 @@ jobs:
           pip install -e .
       - name: Run pytest
         run: pytest -q
+
+  contract-verification:
+    runs-on: ubuntu-22.04
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock
+          pip install -e .
+      - name: Run GitHub-replicable contract verification
+        run: bash scripts/ci_contract_verification.sh
+      - name: Store contract runtime benchmark artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-runtime-benchmark
+          path: artifacts/benchmarks/ci_contract_runtime.json
 
   hf-smoke:
     runs-on: ubuntu-latest

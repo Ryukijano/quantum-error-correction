@@ -136,8 +136,8 @@ def _apply_stim_fallback_metadata(
 ) -> None:
     if not trace_chain:
         return
-    if final_fallback:
-        metadata.trace_tokens = _build_backend_chain("stim", trace_chain)
+    if final_fallback and use_accelerated:
+        metadata.trace_tokens = list(trace_chain) + _trace_token("stim")
     else:
         metadata.trace_tokens = _build_backend_chain("stim", trace_chain)
     if not use_accelerated and all(token.endswith("_unavailable") for token in trace_chain):
