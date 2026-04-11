@@ -310,16 +310,17 @@ fn apply_u3_gate(state: &mut ArrayViewMut2<f64>, qubit: usize, theta: f64, phi: 
 
     let cos_half = (theta / 2.0).cos();
     let sin_half = (theta / 2.0).sin();
-    let e_i_phi_plus_lambda_2 = C64::from_polar(1.0, (phi + lambda) / 2.0);
-    let e_i_phi_minus_lambda_2 = C64::from_polar(1.0, (phi - lambda) / 2.0);
+    let e_i_phi = C64::from_polar(1.0, phi);
+    let e_i_lambda = C64::from_polar(1.0, lambda);
+    let e_i_phi_plus_lambda = C64::from_polar(1.0, phi + lambda);
 
     for i in 0..dim {
         if (i & bit) == 0 {
             let j = i ^ bit;
             let a = get_amplitude(state, i);
             let b = get_amplitude(state, j);
-            set_amplitude(state, i, cos_half * a - sin_half * e_i_phi_minus_lambda_2 * b);
-            set_amplitude(state, j, sin_half * e_i_phi_plus_lambda_2 * a + cos_half * b);
+            set_amplitude(state, i, cos_half * a - e_i_lambda * sin_half * b);
+            set_amplitude(state, j, e_i_phi * sin_half * a + e_i_phi_plus_lambda * cos_half * b);
         }
     }
 }
