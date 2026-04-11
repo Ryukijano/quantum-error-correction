@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+  "tensor_core",
+  "vqe",
+  "rust_kernels",
+  "gqe",
+]
+
+[workspace.dependencies]
+ndarray = { version = "0.15", features = ["rayon", "serde"] }

@@ -1,23 +1,23 @@
-# QuantumForge 🛠️⚛️: High-Performance Quantum-Classical Simulation in Rust
+# QuantumForge: Quantum-Classical Simulation in Rust
 
-`QuantumForge` is a cutting-edge Rust-accelerated toolkit for quantum circuit simulation and hybrid algorithm development. It bridges the gap between high-level Python orchestration (Qiskit) and low-level systems performance (Rust), enabling ultra-fast simulation of noisy quantum systems and variational algorithms.
+`QuantumForge` is a Rust-accelerated toolkit for quantum circuit simulation and hybrid algorithm development. It connects Python-level workflows (including Qiskit) with Rust execution paths for statevector and Pauli-noise primitives.
 
-## 🚀 Performance Overview (HPC Stress Test)
+## Performance summary
 
-The core simulation kernels are implemented in Rust using the `ndarray` crate and parallelized with `rayon`. In our **Quantum HPC Stress Test**, we pushed the simulator to **26 qubits** (512MB statevector) to compare against industry standards.
+The core simulation kernels are implemented in Rust using `ndarray` and `rayon`. The repository includes benchmark scripts that compare behavior from 4 to 26 qubits and record reproducible results and plots.
 
 ![HPC Stress Test](docs/assets/speedup_stress.png)
 
 *Benchmark: Random circuit scaling from 4 to 26 qubits on local CPU.*
 
-### ⚡ Key Wins:
-- **Rust vs. Python (NumPy)**: At 16 qubits, `qhybrid` is **~4,000x faster** than a naive NumPy simulator.
-- **Rust vs. C++ (Qiskit Aer)**: `qhybrid` maintains a performance lead over Aer CPU for small-to-medium circuits (up to ~18 qubits) and remains highly competitive even at scale.
-- **Scalability**: Seamlessly handles up to 26 qubits on standard consumer hardware (48GB RAM), proving Rust's efficiency in memory management and parallel gate application.
+### Benchmark notes
+- **Rust vs. Python (NumPy)**: At 16 qubits, `qhybrid` is approximately **4,000× faster** than a baseline NumPy simulator in the supplied `compare_simulators.py` workflow.
+- **Rust vs. Qiskit Aer**: `qhybrid` is competitive with Aer CPU for the tested qubit counts.
+- **Scalability**: The implementation is validated for circuit sizes up to 26 qubits in local benchmark environments.
 
 ## ⚛️ Hybrid Algorithm Comparison (VQE vs. GQE)
 
-We implemented and compared two flagship hybrid algorithms finding the ground state of the $H_2$ molecule:
+We implemented and compared two hybrid algorithms for finding the ground state of the $H_2$ molecule:
 
 1.  **Variational Quantum Eigensolver (VQE)**: Uses a fixed-structure ansatz (Hardware-Efficient) and optimizes parameters using the **Nelder-Mead** (derivative-free) optimizer.
 2.  **Generative Quantum Eigensolver (GQE)**: An evolutionary approach that **generates** both the circuit structure and parameters, discovering optimal circuit depth automatically.
@@ -42,7 +42,7 @@ To validate correctness and performance, we ran each algorithm on multiple simul
 | NumPy (Fixed) | -1.849557 | 7.72e-03 | 0.027 |
 | Qiskit Aer (CPU) | -1.848820 | 8.45e-03 | 0.019 |
 
-**Key Insight**: The Rust implementation achieves **near-exact ground state** (error < 10⁻⁶). **PyTorch CUDA demonstrates cuQuantum-style GPU acceleration**, while **Qiskit Aer backends** (simulated) show competitive performance. NumPy provides a solid baseline after fixing critical Pauli measurement bugs.
+**Summary**: The VQE benchmark reports matching behavior across backends in this setup, with `qhybrid` as the fastest runtime option in the tested configuration. NumPy is retained as a fallback reference.
 
 #### GQE Backend Comparison
 
@@ -53,17 +53,17 @@ To validate correctness and performance, we ran each algorithm on multiple simul
 | **qhybrid (Rust)** | -1.857275030 | **5.15e-14** | ~0.5 |
 | Python (Qiskit) | -1.836968 | 2.03e-02 | 6.835 |
 
-**Key Insight**: The Rust GQE with advanced angle-tuning mutations reached **machine-precision accuracy** (error ~ 10⁻¹⁴), demonstrating that sophisticated evolutionary strategies converge to the global optimum when implemented correctly.
+**Summary**: In this benchmark configuration, `qhybrid` and the GQE pipeline report very low reported energy error for the selected target.
 
 #### 🔬 cuQuantum HPC Integration
 
-This project demonstrates **quantum-classical HPC** through:
-- **Direct GPU acceleration** via PyTorch CUDA (cuQuantum-style)
-- **Zero-copy memory** transfer between Rust and Python
-- **Parallel tensor operations** using Rayon and ndarray
-- **Statevector simulation** up to 26 qubits on consumer hardware
+This project includes:
+- **PyTorch CUDA (cuQuantum-style)** execution path
+- **Rust/Python exchange** via PyO3-compatible data layout
+- **Parallel tensor operations** via Rayon and ndarray
+- **Statevector simulation** workflows up to 26 qubits on capable hardware
 
-The PyTorch CUDA backend showcases how quantum algorithms can leverage NVIDIA's cuQuantum ecosystem for high-performance computing, enabling larger quantum simulations and faster VQE/GQE convergence.
+The PyTorch CUDA backend allows comparison against selected cuQuantum-style GPU execution paths in the repository benchmark scripts.
 
 ## 🏗️ Architecture
 
@@ -228,7 +228,7 @@ conda run -n qiskit python python/benchmarks/compare_simulators.py
 - **Zero-Copy Interop**: Leverages PyO3 to wrap NumPy arrays into Rust `ndarray` views for minimal overhead.
 
 ## 📄 License
-MIT License. Created as a holiday implementation practice for high-performance scientific computing in Rust.
+MIT License.
 
 ## Repo sync notes for Syndrome-Net consumers
 
