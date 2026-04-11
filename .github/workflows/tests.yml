@@ -71,7 +71,7 @@ jobs:
         run: |
           cd quantumforge/python
           pip install -r requirements.lock
-          maturin develop
+          python -m pip install -e .
       - name: Verify qhybrid fallback contract (fallback path)
         if: matrix.accelerated == false
         run: |
@@ -108,7 +108,7 @@ jobs:
         if: matrix.accelerated == true
         run: |
           cd quantumforge/python
-          maturin develop
+          python -m pip install -e .
       - name: Test qhybrid-kernels with Rust acceleration
         if: matrix.accelerated == true
         run: |
@@ -118,7 +118,7 @@ jobs:
         if: matrix.accelerated == false
         run: |
           cd quantumforge/python
-          PYTHONPATH=src python - <<'PY'
+          PYTHONPATH="${PWD}/src:${PYTHONPATH-}" python - <<'PY'
           import qhybrid_kernels
 
           # Pure-python conversion utilities should remain importable even without the extension.
