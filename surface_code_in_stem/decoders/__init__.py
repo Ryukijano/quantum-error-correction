@@ -14,11 +14,10 @@ def _unavailable_decoder(name: str, import_error: BaseException) -> type:
     message = f"{name} is unavailable because required optional dependency import failed: {import_error!r}"
 
     class _UnavailableDecoder:
-        name = name
-
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise ImportError(message)
 
+    _UnavailableDecoder.name = name
     _UnavailableDecoder.__name__ = name
     _UnavailableDecoder.__qualname__ = name
     return _UnavailableDecoder
