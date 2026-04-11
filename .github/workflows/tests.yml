@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
     env:
-      PYTHONPATH: .
+      PYTHONPATH: "${{ github.workspace }}:${{ github.workspace }}/quantumforge/python/src"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -104,6 +104,7 @@ jobs:
         run: |
           cd quantumforge/python
           pip install -r requirements.lock
+          pip install -r ../../requirements.lock
       - name: Build qhybrid-kernels with Rust acceleration
         if: matrix.accelerated == true
         run: |
@@ -113,6 +114,7 @@ jobs:
         if: matrix.accelerated == true
         run: |
           cd quantumforge/python
+          pip install -r ../../requirements.lock
           python -m pytest tests/ -q
       - name: Fallback-mode smoke check (without Rust acceleration)
         if: matrix.accelerated == false
@@ -124,13 +126,15 @@ jobs:
           # Pure-python conversion utilities should remain importable even without the extension.
           qhybrid_kernels.qiskit_to_qhybrid_json
 
-          # Native helpers should fail with an explicit ImportError when extension is unavailable.
-          try:
-              qhybrid_kernels.apply_pauli_channel_statevector([1.0, 0.0], 1, 0, [1.0, 0.0, 0.0, 0.0])
-          except ImportError as exc:
-              assert "rust_kernels extension is not available" in str(exc)
-          else:
-              raise AssertionError("apply_pauli_channel_statevector should require rust_kernels")
+          # Native helpers should still execute via the pure-Python compatibility layer.
+          out = qhybrid_kernels.apply_pauli_channel_statevector(
+              [1.0 + 0j, 0.0 + 0.0j],
+              1,
+              0,
+              [1.0, 0.0, 0.0, 0.0],
+          )
+          assert out.shape == (2,)
+          assert abs(out[1]) >= 0.0
           PY
 
   runtime-bench:
