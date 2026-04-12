@@ -1005,7 +1005,110 @@ def _reset_rl_runtime_state() -> None:
     st.session_state.backend_profiler_signature = None
 
 
-def _render_circuit_panel(circuit, visualizer: str, diagram_style: str, *, height: int = 540):
+def _build_rl_training_config(
+    *,
+    sampling_backend: str,
+    benchmark_probe_token: str | None,
+    rl_mode: str,
+    distance: int,
+    rounds: int,
+    p_phys: float,
+    episodes: int,
+    batch_size: int,
+    use_diff: bool,
+    rl_decoder: str | None,
+    enable_profile_traces: bool,
+    protocol_name: str,
+    seed: int,
+    curriculum_enabled: bool,
+    curriculum_distance_start: int,
+    curriculum_distance_end: int,
+    curriculum_p_start: float,
+    curriculum_p_end: float,
+    curriculum_ramp_episodes: int,
+    early_stopping_patience: int,
+    early_stopping_min_delta: float,
+    max_gradient_norm: float,
+    pepg_population_size: int,
+    pepg_learning_rate: float,
+    pepg_sigma_learning_rate: float,
+) -> RLTrainingConfig:
+    from surface_code_in_stem.accelerators import qhybrid_backend
+
+    capability = qhybrid_backend.probe_capability()
+    auto_use_accelerated = bool(capability.get("enabled", False))
+    resolved_sampling_backend = None if sampling_backend == "auto" else sampling_backend
+    resolved_use_accelerated = auto_use_accelerated if sampling_backend == "auto" else sampling_backend != "stim"
+    token = benchmark_probe_token.strip() if isinstance(benchmark_probe_token, str) else None
+    trace_token = token if token else None
+
+    return RLTrainingConfig(
+        mode=rl_mode,
+        distance=distance,
+        rounds=rounds,
+        physical_error_rate=p_phys,
+        episodes=episodes,
+        batch_size=batch_size,
+        use_diffusion=use_diff,
+        use_accelerated=resolved_use_accelerated,
+        sampling_backend=resolved_sampling_backend,
+        decoder_name=rl_decoder,
+        enable_profile_traces=enable_profile_traces,
+        benchmark_probe_token=trace_token,
+        protocol=protocol_name,
+        syndrome_emit_every=max(1, episodes // 40),
+        seed=seed,
+        curriculum_enabled=curriculum_enabled,
+        curriculum_distance_start=curriculum_distance_start,
+        curriculum_distance_end=curriculum_distance_end,
+        curriculum_p_start=curriculum_p_start,
+        curriculum_p_end=curriculum_p_end,
+        curriculum_ramp_episodes=curriculum_ramp_episodes,
+        early_stopping_patience=early_stopping_patience,
+        early_stopping_min_delta=early_stopping_min_delta,
+        max_gradient_norm=max_gradient_norm,
+        pepg_population_size=int(pepg_population_size),
+        pepg_learning_rate=float(pepg_learning_rate),
+        pepg_sigma_learning_rate=float(pepg_sigma_learning_rate),
+    )
+
+
+def _drain_rl_events(runner: RLTrainingService) -> bool:
+    events = runner.drain_events(max_events=80, coalesce=True)
+    dropped_events = runner.dropped_events()
+    if dropped_events != st.session_state.queue_drop_count:
+        st.session_state.queue_drop_count = dropped_events
+
+    metrics_updated = False
+    for ev in events:
+        if ev.kind == "metric":
+            data = metric_payload_for_history(ev.payload)
+            _append_history(data, st.session_state.history)
+            st.session_state.history_version += 1
+            st.session_state.history_dirty = True
+            metrics_updated = True
+            st.session_state.training_episode = int(data.get("episode", 0))
+        elif ev.kind == "syndrome":
+            st.session_state.latest_syndrome = np.asarray(ev.payload.get("syndrome", []), dtype=np.int8)
+            st.session_state.latest_action = np.asarray(ev.payload.get("action", []), dtype=np.int8)
+            st.session_state.latest_correct = bool(ev.payload.get("correct", False))
+            st.session_state.history_dirty = st.session_state.history_dirty or metrics_updated
+        elif ev.kind == "done":
+            st.session_state.training_done = True
+        elif ev.kind == "error":
+            st.session_state.training_error = ev.payload.get("message", "")
+
+    return metrics_updated
+
+
+def _render_circuit_panel(
+    circuit,
+    visualizer: str,
+    diagram_style: str,
+    *,
+    height: int = 540,
+    chart_key: str | None = None,
+):
     if visualizer == "matchgraph":
         html_str = circuit_matchgraph_html(circuit)
         st.components.v1.html(html_str, height=height, scrolling=True)
@@ -1013,7 +1116,11 @@ def _render_circuit_panel(circuit, visualizer: str, diagram_style: str, *, heigh
 
     if visualizer == "plotly":
         fig = get_visualizer("plotly").render_circuit(circuit)
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(
+            fig,
+            width="stretch",
+            key=chart_key or f"circuit_plotly_{visualizer}_{height}",
+        )
         return
 
     if visualizer == "crumble":
@@ -1061,7 +1168,13 @@ with tab_circuit:
 
         with col_svg:
             st.markdown("#### Circuit diagram")
-            _render_circuit_panel(circuit, visualizer_name, diagram_type, height=540)
+            _render_circuit_panel(
+                circuit,
+                visualizer_name,
+                diagram_type,
+                height=540,
+                chart_key=f"circuit_plotly_main_{distance}_{rounds}_{p_phys}_{code_family}_{visualizer_name}_{diagram_type}",
+            )
 
         with col_graph:
             st.markdown("#### Detector error graph")
@@ -1071,13 +1184,21 @@ with tab_circuit:
             syn = _sample_detector_syndrome(distance=distance, rounds=rounds, p=p_phys, builder=code_family)
 
             dem_fig = detector_graph(circuit, syndrome=syn, title="DEM — sample syndrome")
-            st.plotly_chart(dem_fig, width="stretch")
+            st.plotly_chart(
+                dem_fig,
+                width="stretch",
+                key=f"dem_graph_main_{distance}_{rounds}_{p_phys}_{code_family}",
+            )
 
         st.divider()
         st.markdown("#### Syndrome heatmap (single shot)")
         if syn is not None:
             hm_fig = syndrome_heatmap(syn, distance=distance)
-            st.plotly_chart(hm_fig, width="stretch")
+            st.plotly_chart(
+                hm_fig,
+                width="stretch",
+                key=f"syndrome_heatmap_main_{distance}_{rounds}_{p_phys}_{code_family}",
+            )
             fired = int(np.sum(syn))
             st.caption(f"🔴 {fired} / {len(syn)} detectors fired in this shot.")
 
@@ -1114,35 +1235,24 @@ with tab_rl:
     with status_col:
         status_box = st.empty()
 
-    # Handle start
     if start_btn:
         if runner and runner.is_running():
             st.warning("Training is already running.")
         else:
             _reset_rl_runtime_state()
-            from surface_code_in_stem.accelerators import qhybrid_backend
-            capability = qhybrid_backend.probe_capability()
-            auto_use_accelerated = bool(capability.get("enabled", False))
-            resolved_sampling_backend = None if sampling_backend == "auto" else sampling_backend
-            resolved_use_accelerated = auto_use_accelerated if sampling_backend == "auto" else sampling_backend != "stim"
-            trace_token = (
-                benchmark_probe_token.strip() if isinstance(benchmark_probe_token, str) else ""
-            )
-            service_config = RLTrainingConfig(
-                mode=rl_mode,
+            service_config = _build_rl_training_config(
+                sampling_backend=sampling_backend,
+                benchmark_probe_token=benchmark_probe_token,
+                rl_mode=rl_mode,
                 distance=distance,
                 rounds=rounds,
-                physical_error_rate=p_phys,
+                p_phys=p_phys,
                 episodes=episodes,
                 batch_size=batch_size,
-                use_diffusion=use_diff,
-                use_accelerated=resolved_use_accelerated,
-                sampling_backend=resolved_sampling_backend,
-                decoder_name=rl_decoder,
+                use_diff=use_diff,
+                rl_decoder=rl_decoder,
                 enable_profile_traces=enable_profile_traces,
-                benchmark_probe_token=trace_token or None,
-                protocol=protocol_name,
-                syndrome_emit_every=max(1, episodes // 40),
+                protocol_name=protocol_name,
                 seed=seed,
                 curriculum_enabled=curriculum_enabled,
                 curriculum_distance_start=curriculum_distance_start,
@@ -1153,13 +1263,12 @@ with tab_rl:
                 early_stopping_patience=early_stopping_patience,
                 early_stopping_min_delta=early_stopping_min_delta,
                 max_gradient_norm=max_gradient_norm,
-                pepg_population_size=int(pepg_population_size),
-                pepg_learning_rate=float(pepg_learning_rate),
-                pepg_sigma_learning_rate=float(pepg_sigma_learning_rate),
+                pepg_population_size=pepg_population_size,
+                pepg_learning_rate=pepg_learning_rate,
+                pepg_sigma_learning_rate=pepg_sigma_learning_rate,
             )
-            new_runner = RLTrainingService(service_config)
-            new_runner.start()
-            st.session_state.runner = new_runner
+            st.session_state.runner = RLTrainingService(service_config)
+            st.session_state.runner.start()
 
     if stop_btn and runner:
         runner.stop()
@@ -1235,16 +1344,30 @@ with tab_rl:
         if circuit is None:
             st.error("Could not build circuit")
         else:
-            _render_circuit_panel(circuit, visualizer_name, diagram_type, height=480)
+            _render_circuit_panel(
+                circuit,
+                visualizer_name,
+                diagram_type,
+                height=480,
+                chart_key=f"circuit_plotly_rl_{distance}_{rounds}_{p_phys}_{code_family}_{visualizer_name}_{diagram_type}",
+            )
             
             st.caption("Detector graph and heatmap below")
             syn = _sample_detector_syndrome(distance=distance, rounds=rounds, p=p_phys, builder=code_family)
             if syn is not None:
                 try:
                     dem_fig = detector_graph(circuit, syndrome=syn, title="DEM — sample")
-                    st.plotly_chart(dem_fig, use_container_width=True)
+                    st.plotly_chart(
+                        dem_fig,
+                        use_container_width=True,
+                        key=f"dem_graph_rl_{distance}_{rounds}_{p_phys}_{code_family}",
+                    )
                     hm_fig = syndrome_heatmap(syn, distance=distance, title="Syndrome Heatmap")
-                    st.plotly_chart(hm_fig, use_container_width=True)
+                    st.plotly_chart(
+                        hm_fig,
+                        use_container_width=True,
+                        key=f"syndrome_heatmap_rl_{distance}_{rounds}_{p_phys}_{code_family}",
+                    )
                 except Exception as e:
                     st.warning(f"Circuit viz error: {e}")
         
@@ -1288,30 +1411,7 @@ with tab_rl:
             '<span class="live-indicator"></span> <span class="badge-running">TRAINING LIVE</span>',
             unsafe_allow_html=True,
         )
-
-        # Drain all queued events this cycle
-        events = runner.drain_events(max_events=80, coalesce=True)
-        if runner.dropped_events() != st.session_state.queue_drop_count:
-            st.session_state.queue_drop_count = runner.dropped_events()
-
-        metrics_updated = False
-        for ev in events:
-            if ev.kind == "metric":
-                data = metric_payload_for_history(ev.payload)
-                _append_history(data, st.session_state.history)
-                st.session_state.history_version += 1
-                st.session_state.history_dirty = True
-                metrics_updated = True
-                st.session_state.training_episode = int(data.get("episode", 0))
-            elif ev.kind == "syndrome":
-                st.session_state.latest_syndrome = np.asarray(ev.payload.get("syndrome", []), dtype=np.int8)
-                st.session_state.latest_action = np.asarray(ev.payload.get("action", []), dtype=np.int8)
-                st.session_state.latest_correct = bool(ev.payload.get("correct", False))
-                st.session_state.history_dirty = st.session_state.history_dirty or metrics_updated
-            elif ev.kind == "done":
-                st.session_state.training_done = True
-            elif ev.kind == "error":
-                st.session_state.training_error = ev.payload.get("message", "")
+        _drain_rl_events(runner)
 
         # Schedule rerun to keep polling
         time.sleep(0.05)
