@@ -1,0 +1,48 @@
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV STREAMLIT_SERVER_PORT=8501
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+ENV PYTHONPATH=/app
+
+ENV CUDA_HOME=/usr/local/cuda
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/lib:${LD_LIBRARY_PATH}
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/local/cuda
+ENV SYNDROME_BACKEND_STRICT=0
+ENV STREAMLIT_TELEMETRY_DISABLED=true
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip ca-certificates \
+    && ln -s /usr/bin/python3 /usr/bin/python \
+    && python -m pip install --upgrade pip \
+    && python -m pip install --no-cache-dir --extra-index-url https://pypi.nvidia.com \
+        "nvidia-cuda-runtime-cu12>=0" "nvidia-cuda-nvrtc-cu12>=0" "nvidia-cublas-cu12>=0" \
+    || true \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.lock app/requirements.lock quantumforge/python/requirements.lock ./
+RUN python -m pip install --no-cache-dir -r requirements.lock \
+    && python -m pip install --no-cache-dir -r quantumforge/python/requirements.lock \
+    && python -m pip install --no-cache-dir -r app/requirements.lock
+
+COPY .streamlit/config.toml /app/.streamlit/config.toml
+COPY pyproject.toml README_HF.md ./
+COPY app/ /app/app/
+COPY surface_code_in_stem/ /app/surface_code_in_stem/
+COPY syndrome_net/ /app/syndrome_net/
+
+RUN python -m pip install --no-cache-dir -e .
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "app/streamlit_app.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
+

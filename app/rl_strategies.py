@@ -102,6 +102,33 @@ def _sampling_trace_payload(env_info: dict[str, Any]) -> dict[str, Any]:
         if trace_tokens:
             profiler_flags.append("trace_chain_recorded")
         payload["profiler_flags"] = ",".join(profiler_flags)
+
+    baseline_decoder = env_info.get("baseline_decoder")
+    if baseline_decoder is not None:
+        payload["baseline_decoder"] = baseline_decoder
+    baseline_decoder_requested = env_info.get("baseline_decoder_requested")
+    if baseline_decoder_requested is not None:
+        payload["baseline_decoder_requested"] = baseline_decoder_requested
+
+    baseline_fallback_reason = env_info.get("baseline_decoder_fallback_reason")
+    if baseline_fallback_reason is not None:
+        payload["baseline_decoder_fallback_reason"] = baseline_fallback_reason
+
+    baseline_diagnostics = env_info.get("baseline_decoder_diagnostics")
+    if isinstance(baseline_diagnostics, dict):
+        payload["baseline_decoder_diagnostics"] = baseline_diagnostics
+        predecode_backend = baseline_diagnostics.get("predecoder_backend")
+        if predecode_backend is not None:
+            payload["baseline_predecoder_backend"] = predecode_backend
+        predecode_latency_ms = baseline_diagnostics.get("predecoder_latency_ms")
+        if predecode_latency_ms is not None:
+            payload["baseline_predecode_latency_ms"] = predecode_latency_ms
+        predecode_fallback = baseline_diagnostics.get("predecoder_fallback_reason")
+        if predecode_fallback is not None:
+            payload["baseline_predecode_fallback_reason"] = predecode_fallback
+        baseline_contract_flags = baseline_diagnostics.get("contract_flags")
+        if baseline_contract_flags is not None:
+            payload["baseline_contract_flags"] = baseline_contract_flags
     return payload
 
 

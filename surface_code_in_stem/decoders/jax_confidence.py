@@ -443,7 +443,6 @@ dependencies in syndrome histories.
         self.head_dim = embed_dim // num_heads
         self.dropout = dropout
 
-        # Initialize weights (would typically be loaded from trained model)
         self._init_weights()
 
     def _init_weights(self) -> None:

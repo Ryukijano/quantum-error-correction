@@ -57,12 +57,64 @@ def test_normalize_event_exposes_backend_metadata_fields() -> None:
     assert normalized.payload["data"]["backend_id"] == "qujax"
 
 
+def test_normalize_event_exposes_baseline_decoder_metadata_fields() -> None:
+    event = _Event(
+        data={
+            "backend_id": "mwpm",
+            "backend_enabled": True,
+            "sample_us": 10.0,
+            "baseline_decoder": "ising",
+            "baseline_decoder_requested": "ising",
+            "baseline_decoder_fallback_reason": "predecode_disabled",
+            "baseline_predecode_backend": "cnn",
+            "baseline_predecode_latency_ms": 2.5,
+            "baseline_predecode_fallback_reason": "none",
+            "baseline_contract_flags": "backend_enabled,contract_met",
+            "baseline_decoder_diagnostics": {
+                "predecoder_backend": "cnn",
+                "predecoder_latency_ms": 2.5,
+                "predecoder_fallback_reason": "none",
+            },
+        }
+    )
+
+    normalized = _normalize_event(event)
+    assert normalized.payload["baseline_decoder"] == "ising"
+    assert normalized.payload["baseline_decoder_requested"] == "ising"
+    assert normalized.payload["baseline_decoder_fallback_reason"] == "predecode_disabled"
+    assert normalized.payload["baseline_predecode_backend"] == "cnn"
+    assert normalized.payload["baseline_predecode_latency_ms"] == 2.5
+    assert normalized.payload["baseline_predecode_fallback_reason"] == "none"
+    assert normalized.payload["baseline_contract_flags"] == "backend_enabled,contract_met"
+    assert normalized.payload["baseline_decoder_diagnostics"]["predecoder_backend"] == "cnn"
+    assert normalized.payload.get("predecoder_seed") is None
+
+
 def test_normalize_event_handles_non_dict_metric_payload() -> None:
     event = _Event(data="not-a-dict")
     normalized = _normalize_event(event)
     assert normalized.payload["data"] == {}
     assert normalized.payload["backend_id"] is None
     assert normalized.payload["sample_us"] is None
+
+
+def test_normalize_event_includes_predecoder_config_fields() -> None:
+    event = _Event(
+        data={
+            "backend_id": "mwpm",
+            "backend_enabled": True,
+            "predecoder_backend": "torch",
+            "predecoder_artifact": "/tmp/ising.pt",
+            "predecoder_seed": 123,
+            "predecoder_fallback_reason": "none",
+        }
+    )
+
+    normalized = _normalize_event(event)
+    assert normalized.payload["predecoder_backend"] == "torch"
+    assert normalized.payload["predecoder_artifact"] == "/tmp/ising.pt"
+    assert normalized.payload["predecoder_seed"] == 123
+    assert normalized.payload["predecoder_fallback_reason"] == "none"
 
 
 def test_metric_payload_for_history_merges_top_level_metadata_fields() -> None:

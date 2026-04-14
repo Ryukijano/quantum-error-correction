@@ -26,6 +26,11 @@ def test_build_threshold_decoder_uses_container_lookup():
         raise AssertionError("Expected KeyError for unknown decoder")
 
 
+def test_build_threshold_decoder_resolves_ising_backend():
+    decoder = circuit_services.build_threshold_decoder("ising")
+    assert decoder.name == "ising"
+
+
 def test_container_registers_new_decoder_backends():
     container = get_container()
     decoders = set(container.decoders.list())

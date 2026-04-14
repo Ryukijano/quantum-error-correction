@@ -298,9 +298,9 @@ with st.sidebar:
             index=0,
             help="Choose explicit sampling backend (auto enables dynamic fallback by capability).",
         )
-        available_rl_decoders = get_decoder_names()
-        if not available_rl_decoders:
-            available_rl_decoders = ["mwpm", "union_find"]
+        available_rl_decoders, available_rl_decoders_fallback = _get_decoder_options()
+        if available_rl_decoders_fallback:
+            st.caption("Using fallback decoder list (registry not ready).")
         default_decoder = "mwpm" if "mwpm" in available_rl_decoders else available_rl_decoders[0]
         rl_decoder = st.selectbox(
             "Decoder backend (for diagnostics)",
@@ -308,6 +308,27 @@ with st.sidebar:
             index=available_rl_decoders.index(default_decoder),
             help="Propagates through training metadata for backend experiments.",
         )
+        predecoder_backend = st.selectbox(
+            "Ising pre-decoder backend",
+            ["identity", "disabled", "torch", "safetensors", "numpy"],
+            index=0,
+            help="Choose how the pre-decoder should be instantiated.",
+        )
+        predecoder_artifact = st.text_input(
+            "Ising pre-decoder artifact path",
+            value="",
+            help="Optional path to a torch/safetensor/numpy artifact. Empty means identity path.",
+        )
+        if predecoder_artifact.strip() == "":
+            predecoder_artifact = None
+        predecoder_seed = st.number_input(
+            "Ising pre-decoder seed",
+            min_value=0,
+            max_value=1_000_000,
+            value=0,
+            step=1,
+        )
+        predecoder_seed = int(predecoder_seed) if rl_decoder == "ising" else None
         enable_profile_traces = st.checkbox("Enable backend trace payload", value=False)
         benchmark_probe_token = st.text_input("Trace token (optional)", value="", help="Optional identifier for trace grouping.")
         if benchmark_probe_token == "":
@@ -556,6 +577,13 @@ def _coerce_str_list(value: Any) -> list[str]:
     if value is None:
         return []
     return [str(value).strip()]
+
+
+def _get_decoder_options() -> tuple[list[str], bool]:
+    decoder_names = get_decoder_names()
+    if decoder_names:
+        return decoder_names, False
+    return ["mwpm", "union_find"], True
 
 
 def _coerce_flag_list(value: Any) -> list[str]:
@@ -1019,6 +1047,9 @@ def _build_rl_training_config(
     rl_decoder: str | None,
     enable_profile_traces: bool,
     protocol_name: str,
+    predecoder_backend: str,
+    predecoder_artifact: str | None,
+    predecoder_seed: int | None,
     seed: int,
     curriculum_enabled: bool,
     curriculum_distance_start: int,
@@ -1058,6 +1089,9 @@ def _build_rl_training_config(
         protocol=protocol_name,
         syndrome_emit_every=max(1, episodes // 40),
         seed=seed,
+        predecoder_backend=predecoder_backend,
+        predecoder_artifact=predecoder_artifact,
+        predecoder_seed=predecoder_seed,
         curriculum_enabled=curriculum_enabled,
         curriculum_distance_start=curriculum_distance_start,
         curriculum_distance_end=curriculum_distance_end,
@@ -1238,6 +1272,8 @@ with tab_rl:
     if start_btn:
         if runner and runner.is_running():
             st.warning("Training is already running.")
+        elif rl_decoder not in available_rl_decoders:
+            st.error(f"Selected decoder '{rl_decoder}' is not available.")
         else:
             _reset_rl_runtime_state()
             service_config = _build_rl_training_config(
@@ -1253,6 +1289,9 @@ with tab_rl:
                 rl_decoder=rl_decoder,
                 enable_profile_traces=enable_profile_traces,
                 protocol_name=protocol_name,
+                predecoder_backend=predecoder_backend,
+                predecoder_artifact=predecoder_artifact,
+                predecoder_seed=predecoder_seed,
                 seed=seed,
                 curriculum_enabled=curriculum_enabled,
                 curriculum_distance_start=curriculum_distance_start,
@@ -1638,7 +1677,10 @@ with tab_threshold:
 
     th_col1, th_col2 = st.columns([1, 2])
     with th_col1:
-        th_decoder = st.selectbox("Decoder", get_decoder_names())
+        available_threshold_decoders, available_threshold_decoders_fallback = _get_decoder_options()
+        if available_threshold_decoders_fallback:
+            st.caption("Using fallback decoder list (registry not ready).")
+        th_decoder = st.selectbox("Decoder", available_threshold_decoders)
         th_builder = st.selectbox("Code family", get_builder_names())
         th_quick    = st.checkbox("Quick sweep (fast, fewer shots)", value=True)
         th_distances = st.multiselect("Distances", [3, 5, 7, 9], default=[3, 5])
@@ -1655,6 +1697,8 @@ with tab_threshold:
     if th_run_btn:
         if st.session_state.threshold_sweep_job is not None:
             th_info.warning("A threshold sweep is already running.")
+        elif th_decoder not in available_threshold_decoders:
+            th_info.error(f"Selected decoder '{th_decoder}' is not available.")
         else:
             p_values = np.linspace(0.003, 0.018, 7) if th_quick else np.linspace(0.001, 0.020, 13)
             shots = 256 if th_quick else 2048

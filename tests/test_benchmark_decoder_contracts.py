@@ -9,6 +9,7 @@ from pathlib import Path
 
 from scripts.benchmark_decoders import (
     BenchmarkRow,
+    _circuit_decoders,
     _backend_row_metadata,
     _normalise_sampling_backends,
     _write_csv,
@@ -67,6 +68,7 @@ def test_csv_output_includes_backend_chain_metadata_fields(tmp_path: Path) -> No
         assert "backend_chain_tokens" in reader.fieldnames
         assert "contract_flags" in reader.fieldnames
         assert "profiler_flags" in reader.fieldnames
+        assert "decoder_diagnostics" in reader.fieldnames
         written = next(reader)
         assert written["backend_chain"] == "selected:stim"
         assert json.loads(written["backend_chain_tokens"]) == ["requested:stim", "selected:stim"]
@@ -171,3 +173,8 @@ def test_sweep_mode_outputs_preserve_chain_token_shape_for_csv_and_json(tmp_path
         assert isinstance(json_chain_tokens, list)
         assert csv_chain_tokens == expected_chain_tokens
         assert json_chain_tokens == expected_chain_tokens
+
+
+def test_circuit_decoder_suite_includes_ising_predecoder() -> None:
+    decoders = _circuit_decoders()
+    assert "ising" in decoders

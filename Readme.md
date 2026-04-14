@@ -1,6 +1,6 @@
-# Syndrome-Net: Quantum Error Correction + RL Control
+# Syndrome-Net: Quantum Error Correction and Reinforcement Learning Control
 
-Syndrome-Net is a research-oriented framework for building, simulating, decoding, and optimizing quantum error-correction (QEC) workflows with Stim. It combines:
+Syndrome-Net is a research-oriented framework for building, simulating, decoding, and evaluating QEC workflows with Stim. The project focuses on:
 
 - Surface-code and dynamic-code circuit generation
 - **Colour code support** (triangular, rectangular, growing, Loom-based hexagonal)
@@ -13,7 +13,7 @@ Syndrome-Net is a research-oriented framework for building, simulating, decoding
 
 ## What’s New
 
-- **Colour code integration** (Lee & Brown 2025, Entropica Loom):
+- **Colour-code integration** (Lee & Brown 2025, Entropica Loom):
   - `ColorCodeStimBuilder`: triangular, rectangular, growing circuits via color-code-stim
   - `LoomColorCodeBuilder`: hexagonal lattice circuits via el-loom Eka/Block abstractions
   - `ConcatenatedMWPMDecoder`: 6-matching decoder (2 per colour R/G/B)
@@ -21,7 +21,7 @@ Syndrome-Net is a research-oriented framework for building, simulating, decoding
   - Parallel threshold estimation with circuit caching (`ParallelColorCodeEstimator`)
   - Hexagonal lattice visualization in Streamlit UI
 - Gym-compatible QEC environments in `surface_code_in_stem/rl_control/gym_env.py`
-- SOTA RL agent implementations in `surface_code_in_stem/rl_control/sota_agents.py`
+- RL agent implementations in `surface_code_in_stem/rl_control/sota_agents.py`
   - Transformer/TITANS-backed PPO for discrete decoding
   - Continuous SAC for calibration control
 - End-to-end training script in `scripts/train_sota_rl.py`
@@ -52,7 +52,7 @@ The demo app includes:
 - `syndrome_net/`: protocol definitions, circuit builders (including colour codes), decoders, parallel utilities
 - `app/`: Streamlit application (circuit viewer, RL training, threshold explorer, colour codes)
 - `codes/`: plugin architecture and benchmarking harness across code families
-- `scripts/`: runnable workflows (including SOTA RL training)
+- `scripts/`: runnable workflows (including RL training)
 - `tests/`: targeted tests for gym envs, bosonic variants, qLDPC parity, and colour codes
 - `surface_code_in_stem/DYNAMIC_CODES.md`: implementation notes mapped to Morvan et al. 2025
 
@@ -149,7 +149,7 @@ loom_builder = LoomColorCodeBuilder()
 circuit_loom = loom_builder.build(spec_loom)
 ```
 
-### 3) Train SOTA RL agents
+### 3) Train RL agents
 
 ```bash
 # Decoder (Transformer/TITANS + PPO)
@@ -177,15 +177,19 @@ python3 -m pytest tests/test_circuit_determinism.py  # Includes colour code dete
 Use these commands to validate backend metadata contracts before sharing artifacts or opening a PR:
 
 ```bash
+python3 scripts/ci_contract_verification.sh
+python3 scripts/benchmark_decoders.py --quick --sampling-backends stim --suite circuit --output-dir artifacts/benchmarks
+```
+
+The contract script runs:
+
+```bash
+python3 -m pytest tests/test_gym_env.py
 python3 -m pytest \
   tests/test_sampling_backend_contracts.py \
   tests/test_benchmark_decoder_contracts.py \
-  tests/test_math_validity_helpers.py \
-  tests/test_architectural_registries.py \
-  tests/test_runtime_contracts.py \
-  tests/test_cuda_q_decoder.py
-python3 scripts/bench_runtime_contracts.py --output artifacts/benchmarks/runtime.json
-python3 scripts/benchmark_decoders.py --quick --sampling-backends sweep --suite circuit --seed 11 --output-dir artifacts/benchmarks
+  tests/test_runtime_contracts.py
+python3 scripts/bench_runtime_contracts.py --output artifacts/benchmarks/ci_contract_runtime.json
 ```
 
 ## Running benchmark and Streamlit metadata exports
