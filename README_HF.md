@@ -11,129 +11,120 @@ license: mit
 short_description: Interactive Quantum Error Correction + RL visualizer
 ---
 
-# ⚛️ Syndrome-Net QEC Lab
+# Syndrome-Net QEC Lab
 
-Interactive visualizer for **quantum error correction** circuits
-and **reinforcement learning** decoders, powered by
-[Stim](https://github.com/quantumlib/Stim) and
-[Syndrome-Net](https://github.com/Ryukijano/syndrome-net).
+## App purpose
 
-## Tabs
+Syndrome-Net is a Streamlit dashboard for building and inspecting quantum error-correcting circuits plus RL-based decoding workflows. It runs Stim-driven workflow simulations in the browser and exposes:
 
-| Tab | Description |
-|-----|-------------|
-| 🔬 **Circuit Viewer** | Stim SVG circuit diagrams (timeline / detector-slice) + Crumble interactive editor + detector error graph with fired-detector highlighting |
-| ⚡ **RL Live Training** | Start Transformer-PPO or Continuous-SAC training and watch reward, success rate, and syndrome heatmaps update live |
-| 📈 **Threshold Explorer** | Sweep physical error rates → log-scale p_L curves with automatic threshold crossing detection |
-| 🛰 **Teraquop Footprint** | Physical qubit overhead estimator across surface / hexagonal / toric / hypergraph-product codes |
+- **Circuit Viewer** for detector-slice and timeline visualizations.
+- **RL Live Training** for PPO/SAC/PEPG experiments.
+- **Threshold Explorer** for logical-error-rate sweeps.
+- **Teraquop Footprint** for overhead estimates across code families.
 
-## Running locally (conda `jax` env)
+## Deployment context
 
-```bash
-git clone https://github.com/Ryukijano/syndrome-net
-cd syndrome-net
-conda activate jax
-pip install -r app/requirements.lock
-streamlit run app/streamlit_app.py
-```
+This document is intentionally focused on deployment and Space-style usage. For full API, research, and development instructions, use the root `Readme.md`.
 
-Or via the convenience wrapper (defaults to the `jax` env):
+## Deploy quickstart
+
+### Hugging Face Spaces
+
+The app is configured via the YAML header above (`app_file: app/streamlit_app.py`) and `app/requirements.lock`.
 
 ```bash
-chmod +x run_app.sh
-./run_app.sh
+git remote add space https://huggingface.co/spaces/<org>/<space-name>
+git push space main
 ```
 
-To run any analysis script in the same env:
+Use `main` as the deployment branch, or set your Space to track a different branch.
 
-```bash
-chmod +x run_scripts.sh
-./run_scripts.sh scripts/plot_threshold.py --quick
-./run_scripts.sh scripts/benchmark_decoders.py --quick
-```
-
-### Optional accelerated backend stack
-
-If you want to profile GPU-accelerated or optional Rust-accelerated sampling paths from the app UI:
-
-- `qhybrid` backend: optional local build via `quantumforge/python`
-  ```bash
-  cd quantumforge/python
-  python -m pip install -r requirements.lock
-  pip install maturin
-  maturin develop
-  ```
-- `cuquantum` backend: install from NVIDIA container/Conda package (`cuquantum`)
-- `qujax` backend: JAX-enabled environment (`jax`, `jaxlib`)
-- `cudaq` backend: `pip install cudaq` (or provider package)
-
-The UI uses `Auto` backend probing by default and records fallback/profiling details in each metric payload (`backend_chain`, `backend_id`, `contract_flags`, `profiler_flags`).
-
-### Backend dependency matrix (Syndrome-Net)
-
-| Backend ID | Module/Package | Probe trigger | Default behaviour |
-|---|---|---|---|
-| `qhybrid` | `qhybrid_kernels.rust_kernels` | `qhybrid_backend.probe_capability()["enabled"]` | Fast path when Rust extension is installed; otherwise fallback to `stim` |
-| `cuquantum` | `cuquantum.tensornet` | `from cuquantum import tensornet` succeeds | Optional; enters after qhybrid when probing |
-| `qujax` | `jax` | `import jax` succeeds | Optional; currently wrapper-backed fallback path |
-| `cudaq` | `cudaq` | `import cudaq` succeeds | Optional; enters after qujax when probing |
-| `stim` | `stim` | `import stim` succeeds | Baseline path used as final fallback |
-
-Note: `Dockerfile.hf` currently installs `quantumforge/python/requirements.lock` but does not run a Rust toolchain build step, so `qhybrid` is usually unavailable in vanilla Space runtime images unless pre-built wheels are provided separately.
-
-### Merge and deployment strategy for accelerated stack
-
-If you keep `quantumforge` in a separate canonical repository, treat this repo as a consumable consumer snapshot:
-
-- keep `requirements.lock`, `app/requirements.lock`, and `quantumforge/python/requirements.lock` aligned.
-- sync upstream `quantumforge` releases by snapshotting files into `quantumforge/` on a controlled branch.
-- maintain optional backend compatibility checks in CI (`backend_contracts`, `runtime_contracts`) so consumers can see when `qhybrid`/`cuquantum`/`qujax`/`cudaq` behavior changes.
-
-Suggested verification before pushing to HF:
-
-```bash
-python3 scripts/ci_contract_verification.sh
-```
-
-For deployment documentation including command-level repo merge options, see
-`docs/REPO_MERGE_AND_DEPLOYMENT.md`.
-
-For full QEC and colour-code experiments, install:
-
-```bash
-pip install -r requirements-qec.txt
-```
-
-## Streamlit controls you should expect
-
-The advanced sidebars in `app/streamlit_app.py` map to three key runtime surfaces:
-
-- **Advanced backend controls**: sampling backend selection, backend probing trace token, and profiler payload toggle
-- **Advanced RL controls**: curriculum, early stopping, PPO/SAC/PEPG-specific knobs
-- **RL mode selection**: `ppo`, `sac`, or `pepg` loops from the RL Live Training tab
-
-## Deploying to Hugging Face Spaces
-
-Push this repository to your Space — the YAML header above tells HF Spaces
-to use the Streamlit SDK and `app/requirements.lock` for app dependencies.
-
-```bash
-git remote add space https://huggingface.co/spaces/Ryukijano/<space-name>
-git subtree push --prefix=. space main
-```
-
-## Reproducible Container Runtime
+### Docker
 
 ```bash
 docker build -f Dockerfile.hf -t syndrome-net-hf .
 docker run --rm -p 8501:8501 syndrome-net-hf
 ```
 
-For deterministic builds, the container image installs dependencies from:
+### Local smokeable launch
 
-- `requirements.lock`
-- `app/requirements.lock`
-- `quantumforge/python/requirements.lock`
+```bash
+conda activate jax
+pip install -r app/requirements.lock
+python3 scripts/run_streamlit_smoke.py --timeout 35
+python3 -m streamlit run app/streamlit_app.py
+```
 
-The Streamlit runtime reads `.streamlit/config.toml` for stable
-server/theme defaults.
+Wrapper (repo helper):
+
+```bash
+./run_app.sh
+```
+
+`run_app.sh` defaults to conda env `ENV=jax` and exposes `PORT` to Streamlit.
+
+## Environment prerequisites
+
+- Python: 3.10+ (HF build uses project lockfiles, typically Python 3.11 in CI).
+- Memory/storage: enough for your chosen circuit sizes and RL episode depth.
+- Backend dependencies:
+  - Minimum: `app/requirements.lock` (works in fallback mode).
+  - Optional accelerators: `requirements.lock`, `quantumforge/python/requirements.lock`, and platform backends (`qhybrid`, `cuquantum`, `qujax`, `cudaq`) when installed.
+- OS/runtime: CPU-only Space images are supported; optional CUDA paths only when packages and drivers are available.
+- Optional script dependencies: for non-app scripts use normal package install + `python` from the same Python environment.
+
+## Smoke checks
+
+Run these before sharing a deployment:
+
+```bash
+python3 scripts/run_streamlit_smoke.py --timeout 35
+python3 scripts/ci_contract_verification.sh
+```
+
+Reproducibility smoke:
+
+```bash
+python3 -m pytest tests/test_streamlit_backend_metadata.py tests/test_runtime_contracts.py
+```
+
+For Docker verification:
+
+```bash
+docker run --rm -d --name syndrome-net-hf -p 8501:8501 syndrome-net-hf
+python3 - <<'PY'
+import urllib.request
+print("status:", urllib.request.urlopen("http://127.0.0.1:8501").status)
+PY
+docker stop syndrome-net-hf
+```
+
+## Supported branches and entrypoints
+
+- **Preferred deploy branch**: `main`.
+- **Space entrypoint**: `app/streamlit_app.py` (`app_file` in header).
+- **Container entrypoint**: `streamlit run app/streamlit_app.py --server.address 0.0.0.0 --server.port 8501` (from `Dockerfile.hf`).
+- **CI entrypoint**: `scripts/run_streamlit_smoke.py`.
+- **Auxiliary runners**: `run_scripts.sh` for other repo scripts and `run_app.sh` for Streamlit.
+
+## Expected output
+
+- HF Space or container serves Streamlit at `http://localhost:8501` (or Space URL).
+- Landing UI shows the four primary tabs above and sidebar mode controls.
+- Smoke scripts return exit code `0`.
+- Log output should include app boot and optional backend fallback metadata (`backend_id`, `backend_chain`, `contract_flags`, `profiler_flags`) when enabled.
+
+## Troubleshooting checklist
+
+- **App starts but UI blank**: confirm `app/streamlit_app.py` exists and branch matches `main` or configured Space branch.
+- **`ModuleNotFoundError` on launch**: ensure dependencies from `app/requirements.lock` installed and `python` points to same env as dependency install.
+- **Port 8501 already in use**: change port via `PORT=<port> ./run_app.sh` or `-p <port>:8501` in Docker.
+- **Docker build hangs**: network/proxy issues or stale pip cache; retry with a clean build.
+- **Qhybrid/cudaq/cuquantum warnings**: expected when optional accelerators are unavailable; app should continue with Stim fallback.
+- **Streamlit smoke timeout**: check startup logs; large models may need more startup time or stricter memory limits.
+
+## Contributing and support
+
+- For development and PR workflows, use root `Readme.md` plus `CONTRIBUTING.md`.
+- Report security issues via `SECURITY.md`.
+- Use `CODE_OF_CONDUCT.md` for behavior expectations.

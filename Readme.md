@@ -11,6 +11,13 @@ Syndrome-Net is a research-oriented framework for building, simulating, decoding
   - continuous calibration (`QECContinuousControlEnv`, `ColourCodeCalibrationEnv`)
   - code discovery (`QECCodeDiscoveryEnv`, `ColourCodeDiscoveryEnv`)
 
+## What changed in the latest merge (`main`)
+
+- Integrated the NVIDIA Ising pre-decoder path with metadata-driven artifact selection in `surface_code_in_stem/decoders/ising_predecoder.py`.
+- Fixed runtime pre-decoder configuration regressions and made baseline contract diagnostics deterministic in `surface_code_in_stem/rl_control/gym_env.py`.
+- Added Streamlit and benchmark contract smoke checks that validate backend metadata (`backend_id`, `contract_flags`, `profiler_flags`).
+- Aligned repo documentation, runbook guidance, and deployment instructions for cleaner push and onboarding workflows.
+
 ## What’s New
 
 - **Colour-code integration** (Lee & Brown 2025, Entropica Loom):
@@ -165,11 +172,22 @@ python3 scripts/train_sota_rl.py --mode all --episodes 1000
 ### 4) Run tests
 
 ```bash
-python3 -m pytest tests/test_gym_env.py
-python3 -m pytest tests/test_bosonic.py
-python3 -m pytest tests/test_qldpc_parity.py
-python3 -m pytest tests/test_colour_codes.py  # Colour code tests
-python3 -m pytest tests/test_circuit_determinism.py  # Includes colour code determinism
+python3 scripts/run_streamlit_smoke.py --timeout 35
+python3 -m pytest \
+  tests/test_gym_env.py \
+  tests/test_ising_predecoder.py \
+  tests/test_benchmark_decoder_contracts.py \
+  tests/test_decoder_registry_backends.py \
+  tests/test_decoder_resolution.py \
+  tests/test_streamlit_backend_metadata.py \
+  tests/test_runtime_contracts.py
+
+# Focused benchmark + contract smoke path
+python3 scripts/benchmark_decoders.py --quick --sampling-backends stim --suite circuit --output-dir artifacts/benchmarks
+python3 scripts/ci_contract_verification.sh
+
+# Full repository test run (slower)
+python3 -m pytest tests
 ```
 
 ## Backend and benchmark contract checks
@@ -184,11 +202,13 @@ python3 scripts/benchmark_decoders.py --quick --sampling-backends stim --suite c
 The contract script runs:
 
 ```bash
-python3 -m pytest tests/test_gym_env.py
 python3 -m pytest \
   tests/test_sampling_backend_contracts.py \
   tests/test_benchmark_decoder_contracts.py \
-  tests/test_runtime_contracts.py
+  tests/test_runtime_contracts.py \
+  tests/test_streamlit_backend_metadata.py \
+  tests/test_decoder_registry_backends.py \
+  tests/test_decoder_resolution.py
 python3 scripts/bench_runtime_contracts.py --output artifacts/benchmarks/ci_contract_runtime.json
 ```
 
@@ -323,6 +343,12 @@ flowchart LR
 - `docs/RL_QEC_ARCHITECTURE.md`: detailed architecture and algorithm internals with Mermaid diagrams
 - `RL_EXPERIMENTS.md`: reproducibility notes
 - `surface_code_in_stem/DYNAMIC_CODES.md`: dynamic-code implementation notes
+
+## Contributing and repository governance
+
+- See `CONTRIBUTING.md` for issue and PR flow.
+- See `SECURITY.md` for vulnerability reporting guidance.
+- See `CODE_OF_CONDUCT.md` for collaboration expectations.
 
 ## Colour Code References
 
