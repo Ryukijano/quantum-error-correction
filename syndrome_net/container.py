@@ -180,6 +180,54 @@ def _register_optional_builder(
             )
 
 
+def _register_optional_builder_if_available(
+    registry: "CircuitBuilderRegistry",
+    name: str,
+    builder_type: Callable[[], Any],
+    component_name: str,
+    availability_probe: Callable[[], bool],
+    unavailable_message: str,
+) -> None:
+    if not _safe_optional_component_available(
+        component_name=component_name,
+        available=availability_probe,
+    ):
+        _LOGGER.warning("%s", unavailable_message)
+        return
+
+    _register_optional_builder(
+        registry,
+        name,
+        builder_type,
+        fallback_message=unavailable_message,
+    )
+
+
+def _register_discovered_components(
+    registry: Any,
+    discovered: Iterable[tuple[str, Any]],
+    *,
+    validate: Callable[[Any], bool],
+    is_duplicate: Callable[[str], bool],
+    type_label: str,
+) -> None:
+    for item_name, item in sorted(discovered, key=lambda pair: pair[0]):
+        if is_duplicate(item_name):
+            _LOGGER.debug("Skipping duplicate %s entry '%s'", type_label, item_name)
+            continue
+        if not validate(item):
+            _LOGGER.warning("Skipping invalid %s '%s': missing interface", type_label, item_name)
+            if __debug__:
+                _LOGGER.debug("Invalid %s candidate: %r", type_label, item)
+            continue
+        try:
+            registry.register(item_name, item)
+        except Exception as exc:
+            _LOGGER.warning("Skipping %s '%s': %s", type_label, item_name, exc)
+            if __debug__:
+                _LOGGER.debug("Error registering %s '%s'", type_label, item_name, exc_info=True)
+
+
 @dataclass
 class ContainerConfig:
     """Configuration for the dependency injection container."""
@@ -269,6 +317,7 @@ class DIContainer:
             SparseBlossomDecoder,
             QuJaxNeuralBPDecoder,
             UnionFindDecoder,
+            IsingDecoder,
         )
         from syndrome_net.noise import IIDDepolarizingModel, BiasedNoiseModel
         from syndrome_net.visualizers import CrumbleVisualizer, PlotlyVisualizer, SVGVisualizer
@@ -281,78 +330,38 @@ class DIContainer:
         self._circuit_builders.register("xyz2", XYZ2HexagonalBuilder())
 
         # Colour code builders (graceful fallback if optional dependencies are missing)
-        if _safe_optional_component_available(
+        _register_optional_builder_if_available(
+            self._circuit_builders,
+            "color_code",
+            ColorCodeStimBuilder,
             component_name="color-code-stim builder",
-            available=ColorCodeStimBuilder.is_available,
-        ):
-            _register_optional_builder(
-                self._circuit_builders,
-                "color_code",
-                ColorCodeStimBuilder,
-                fallback_message="color-code-stim builder unavailable",
-            )
-        else:
-            _LOGGER.warning("color-code-stim builder unavailable because dependency is missing")
-
-        if _safe_optional_component_available(
+            availability_probe=ColorCodeStimBuilder.is_available,
+            unavailable_message="color-code-stim builder unavailable",
+        )
+        _register_optional_builder_if_available(
+            self._circuit_builders,
+            "loom_color_code",
+            LoomColorCodeBuilder,
             component_name="el-loom builder",
-            available=LoomColorCodeBuilder.is_available,
-        ):
-            _register_optional_builder(
-                self._circuit_builders,
-                "loom_color_code",
-                LoomColorCodeBuilder,
-                fallback_message="el-loom builder unavailable",
-            )
-        else:
-            _LOGGER.warning("el-loom builder unavailable because dependency is missing")
+            availability_probe=LoomColorCodeBuilder.is_available,
+            unavailable_message="el-loom builder unavailable",
+        )
 
-        # Dynamically discovered circuit builders from plugin entry points.
-        for builder_name, builder in sorted(
+        _register_discovered_components(
+            self._circuit_builders,
             _iter_discovered_circuit_builders(),
-            key=lambda item: item[0],
-        ):
-            if not _is_valid_circuit_builder(builder):
-                _LOGGER.warning(
-                    "Skipping invalid circuit-builder entry point '%s': missing CircuitBuilder interface",
-                    builder_name,
-                )
-                if __debug__:
-                    _LOGGER.debug("Invalid circuit-builder candidate: %r", builder)
-                continue
-
-            try:
-                self._circuit_builders.register(builder_name, builder)
-            except Exception as exc:
-                _LOGGER.warning("Skipping circuit-builder '%s': %s", builder_name, exc)
-                if __debug__:
-                    _LOGGER.debug("Error registering dynamic circuit builder", exc_info=True)
+            validate=_is_valid_circuit_builder,
+            is_duplicate=lambda name: False,
+            type_label="circuit-builder",
+        )
         
-        # Decoders discovered from plugin entry points.
-        for decoder_name, decoder in sorted(
+        _register_discovered_components(
+            self._decoders,
             _iter_discovered_decoders(),
-            key=lambda item: item[0],
-        ):
-            if decoder_name in self._decoders:
-                _LOGGER.debug(
-                    "Skipping duplicate decoder entry point '%s': already registered",
-                    decoder_name,
-                )
-                continue
-            if not _is_valid_decoder(decoder):
-                _LOGGER.warning(
-                    "Skipping invalid decoder entry point '%s': missing Decoder protocol",
-                    decoder_name,
-                )
-                if __debug__:
-                    _LOGGER.debug("Invalid decoder candidate: %r", decoder)
-                continue
-            try:
-                self._decoders.register(decoder_name, decoder)
-            except Exception as exc:
-                _LOGGER.warning("Skipping decoder '%s': %s", decoder_name, exc)
-                if __debug__:
-                    _LOGGER.debug("Error registering dynamic decoder", exc_info=True)
+            validate=_is_valid_decoder,
+            is_duplicate=lambda name: name in self._decoders,
+            type_label="decoder",
+        )
 
         # Fallback defaults for built-in decoders (keeps behaviour stable if no
         # plugin metadata is available in a runtime environment).
@@ -364,6 +373,7 @@ class DIContainer:
             "qujax": QuJaxNeuralBPDecoder,
             "cuqnn": CuQNNBackendAdapterDecoder,
             "jax_confidence": JAXConfidenceDecoderAdapter,
+            "ising": IsingDecoder,
         }
         for decoder_name, decoder_factory in default_decoders.items():
             if decoder_name in self._decoders:

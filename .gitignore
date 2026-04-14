@@ -26,11 +26,18 @@ wheels/
 # Environment
 .env
 .venv
+.venv-*
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Local tool/workspace state
+.cursor/
+.windsurf/
+.streamlit/*
+!.streamlit/config.toml
 
 # IDE
 .vscode/

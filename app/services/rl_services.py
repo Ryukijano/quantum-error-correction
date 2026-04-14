@@ -7,7 +7,11 @@ from typing import Any, Callable, Mapping
 import json
 
 from app.rl_runner import RLRunner
-from app.services.circuit_services import estimate_logical_error_rate, service_build_circuit
+from app.services.circuit_services import (
+    build_threshold_decoder,
+    estimate_logical_error_rate,
+    service_build_circuit,
+)
 
 
 ProgressCallback = Callable[[int, int], None]
@@ -27,6 +31,18 @@ _METADATA_FIELDS = (
     "ler_ci",
     "trace_id",
     "fallback_reason",
+    "baseline_decoder",
+    "baseline_decoder_requested",
+    "baseline_decoder_diagnostics",
+    "baseline_decoder_fallback_reason",
+    "baseline_predecode_backend",
+    "baseline_predecode_latency_ms",
+    "baseline_predecode_fallback_reason",
+    "baseline_contract_flags",
+    "predecoder_backend",
+    "predecoder_artifact",
+    "predecoder_seed",
+    "predecoder_fallback_reason",
 )
 
 
@@ -55,6 +71,9 @@ class RLTrainingConfig:
     protocol: str = "surface"
     syndrome_emit_every: int = 5
     seed: int = 0
+    predecoder_backend: str = "identity"
+    predecoder_artifact: str | None = None
+    predecoder_seed: int | None = None
     curriculum_enabled: bool = False
     curriculum_distance_start: int | None = None
     curriculum_distance_end: int | None = None
@@ -74,6 +93,12 @@ class RLTrainingService:
 
     def __init__(self, config: RLTrainingConfig):
         self._config = config
+        runtime_protocol_metadata = {
+            "predecoder_backend": config.predecoder_backend,
+            "predecoder_artifact": config.predecoder_artifact,
+            "predecoder_seed": config.predecoder_seed,
+        }
+        runtime_protocol_metadata = {k: v for k, v in runtime_protocol_metadata.items() if v is not None}
         self._runner = RLRunner(
             mode=config.mode,
             distance=config.distance,
@@ -89,6 +114,7 @@ class RLTrainingService:
             benchmark_probe_token=config.benchmark_probe_token,
             syndrome_emit_every=config.syndrome_emit_every,
             protocol=config.protocol,
+            protocol_metadata=runtime_protocol_metadata or None,
             seed=config.seed,
             curriculum_enabled=config.curriculum_enabled,
             curriculum_distance_start=config.curriculum_distance_start,
@@ -212,6 +238,9 @@ def _normalize_event(event: Any) -> RLPanelEvent:
             "trace_id": data.get("trace_id"),
             "fallback_reason": data.get("fallback_reason"),
         }
+        for field in _METADATA_FIELDS:
+            if field in data:
+                normalized[field] = data[field]
         if isinstance(getattr(event, "data", None), Mapping):
             normalized["data"] = _merge_metadata_fields(normalized, normalized["data"])
         return RLPanelEvent("metric", normalized)
@@ -247,6 +276,8 @@ def run_threshold_sweep(
     on_progress: ProgressCallback | None = None,
 ) -> dict[int, list[tuple[float, float]]]:
     """Run the circuit/decoder threshold sweep using circuit services."""
+
+    build_threshold_decoder(decoder_name)
 
     data: dict[int, list[tuple[float, float]]] = {}
     total = len(distances) * len(p_values)

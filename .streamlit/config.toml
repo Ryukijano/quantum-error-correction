@@ -1,0 +1,12 @@
+[server]
+enableStaticServing = true
+headless = true
+port = 8501
+address = "0.0.0.0"
+
+[client]
+showErrorDetails = true
+toolbarMode = "minimal"
+
+[theme]
+base = "dark"

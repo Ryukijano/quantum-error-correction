@@ -8,7 +8,7 @@ pytest.importorskip("gymnasium")
 stim = pytest.importorskip("stim")
 
 from surface_code_in_stem.rl_control.gym_env import QECGymEnv, QECContinuousControlEnv
-from surface_code_in_stem.decoders import DecoderOutput
+from surface_code_in_stem.decoders import DecoderOutput, DecoderMetadata
 
 
 def test_qec_gym_env_initialization():
@@ -82,6 +82,83 @@ def test_qec_gym_env_falls_back_to_mwpm_when_decoder_missing(monkeypatch):
     _, info = env.reset(seed=5)
     assert info["baseline_decoder_requested"] == "missing_decoder"
     assert info["baseline_decoder"] == "mwpm"
+    assert str(info.get("baseline_decoder_fallback_reason", "")).startswith("fallback_to_mwpm_decoder")
+
+
+def test_qec_gym_env_exposes_baseline_diagnostics(monkeypatch):
+    class FakeDecoder:
+        name = "mock_diagnostics_decoder"
+
+        def decode(self, detector_events: Any, metadata: Any) -> DecoderOutput:
+            predictions = np.zeros((1, metadata.num_observables), dtype=np.int8)
+            return DecoderOutput(
+                logical_predictions=predictions,
+                decoder_name=self.name,
+                diagnostics={
+                    "predecoder_backend": "fake_cnn",
+                    "predecoder_latency_ms": 1.5,
+                    "predecoder_fallback_reason": "none",
+                    "contract_flags": "backend_enabled,contract_met",
+                },
+            )
+
+    class FakeContainer:
+        def get_decoder(self, name: str) -> object:
+            assert name == "mock_diagnostics_decoder"
+            return FakeDecoder()
+
+    monkeypatch.setattr(
+        "syndrome_net.container.get_container",
+        lambda: FakeContainer(),
+    )
+    env = QECGymEnv(distance=3, rounds=2, physical_error_rate=0.01, decoder_name="mock_diagnostics_decoder")
+    _, info = env.reset(seed=6)
+    diagnostics = info["baseline_decoder_diagnostics"]
+    assert diagnostics["predecoder_backend"] == "fake_cnn"
+    assert diagnostics["predecoder_latency_ms"] == 1.5
+    assert info["baseline_predecode_backend"] == "fake_cnn"
+    assert info["baseline_predecode_latency_ms"] == 1.5
+    assert info["baseline_predecode_fallback_reason"] == "none"
+    assert info["baseline_contract_flags"] == "backend_enabled,contract_met"
+
+
+def test_qec_gym_env_passes_predecoder_protocol_metadata(monkeypatch):
+    captured_extra: dict[str, object] = {}
+
+    class FakeDecoder:
+        name = "fake_predecoder"
+
+        def decode(self, detector_events: Any, metadata: DecoderMetadata) -> DecoderOutput:
+            captured_extra.update(dict(metadata.extra))
+            predictions = np.zeros((1, metadata.num_observables), dtype=np.int8)
+            return DecoderOutput(logical_predictions=predictions, decoder_name=self.name, diagnostics={})
+
+    class FakeContainer:
+        def get_decoder(self, name: str) -> object:
+            assert name == "fake_predecoder"
+            return FakeDecoder()
+
+    monkeypatch.setattr(
+        "syndrome_net.container.get_container",
+        lambda: FakeContainer(),
+    )
+    env = QECGymEnv(
+        distance=3,
+        rounds=2,
+        physical_error_rate=0.01,
+        decoder_name="fake_predecoder",
+        protocol_metadata={
+            "predecoder_backend": "torch",
+            "predecoder_artifact": "/tmp/does-not-matter.pt",
+            "predecoder_seed": 42,
+        },
+    )
+    _, info = env.reset(seed=7)
+    assert info["baseline_decoder"] == "fake_predecoder"
+    assert captured_extra["predecoder_backend"] == "torch"
+    assert captured_extra["predecoder_artifact"] == "/tmp/does-not-matter.pt"
+    assert captured_extra["predecoder_seed"] == 42
+    assert isinstance(info["baseline_decoder_diagnostics"], dict)
 
 
 def test_qec_continuous_control_env():

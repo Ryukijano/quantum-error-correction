@@ -136,8 +136,8 @@ def _apply_stim_fallback_metadata(
 ) -> None:
     if not trace_chain:
         return
-    if final_fallback:
-        metadata.trace_tokens = _build_backend_chain("stim", trace_chain)
+    if final_fallback and use_accelerated:
+        metadata.trace_tokens = list(trace_chain) + _trace_token("stim")
     else:
         metadata.trace_tokens = _build_backend_chain("stim", trace_chain)
     if not use_accelerated and all(token.endswith("_unavailable") for token in trace_chain):
@@ -486,7 +486,10 @@ def build_sampling_backend(
                 last_reason = "qhybrid disabled or unavailable"
                 continue
             try:
-                return _QhybridSamplingBackend(circuit, seed, details=details)
+                selected = _QhybridSamplingBackend(circuit, seed, details=details)
+                if candidate != preference and last_reason is not None:
+                    selected.metadata.fallback_reason = last_reason
+                return selected
             except RuntimeError as exc:
                 trace_chain.append("qhybrid_fallback")
                 last_reason = f"qhybrid sample path failed: {exc}"
@@ -500,7 +503,10 @@ def build_sampling_backend(
                 last_reason = "cuquantum disabled or unavailable"
                 continue
             try:
-                return _CuQuantumSamplingBackend(circuit, seed, details=details)
+                selected = _CuQuantumSamplingBackend(circuit, seed, details=details)
+                if candidate != preference and last_reason is not None:
+                    selected.metadata.fallback_reason = last_reason
+                return selected
             except RuntimeError as exc:
                 trace_chain.append("cuquantum_fallback")
                 last_reason = f"cuquantum sample path failed: {exc}"
@@ -514,7 +520,10 @@ def build_sampling_backend(
                 last_reason = "qujax disabled or unavailable"
                 continue
             try:
-                return _QuJaxSamplingBackend(circuit, seed, details=details)
+                selected = _QuJaxSamplingBackend(circuit, seed, details=details)
+                if candidate != preference and last_reason is not None:
+                    selected.metadata.fallback_reason = last_reason
+                return selected
             except RuntimeError as exc:
                 trace_chain.append("qujax_fallback")
                 last_reason = f"qujax sample path failed: {exc}"
@@ -528,7 +537,10 @@ def build_sampling_backend(
                 last_reason = "cudaq disabled or unavailable"
                 continue
             try:
-                return _CudaQSamplingBackend(circuit, seed, details=details)
+                selected = _CudaQSamplingBackend(circuit, seed, details=details)
+                if candidate != preference and last_reason is not None:
+                    selected.metadata.fallback_reason = last_reason
+                return selected
             except RuntimeError as exc:
                 trace_chain.append("cudaq_fallback")
                 last_reason = f"cudaq sample path failed: {exc}"

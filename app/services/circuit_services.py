@@ -7,6 +7,7 @@ from typing import Any
 
 from syndrome_net import CircuitSpec
 from syndrome_net.container import get_container
+from surface_code_in_stem.decoders.resolution import resolve_threshold_decoder
 
 
 @lru_cache(maxsize=4)
@@ -31,12 +32,7 @@ class ThresholdDecoderFactory:
 
     def build(self, decoder_name: str):
         """Resolve a decoder by name with a consistent validation path."""
-        container = get_container()
-        if decoder_name not in container.decoders.list():
-            raise KeyError(
-                f"Unknown threshold decoder '{decoder_name}'. Available: {container.decoders.list()}"
-            )
-        return container.get_decoder(decoder_name)
+        return resolve_threshold_decoder(decoder_name)
 
 
 @lru_cache(maxsize=4)

@@ -71,7 +71,7 @@ python3 -m pytest \
   tests/test_runtime_contracts.py \
   tests/test_architectural_registries.py
 
-python3 scripts/bench_runtime_contracts.py --output artifacts/benchmarks/runtime.json
+python3 scripts/ci_contract_verification.sh
 python3 scripts/benchmark_decoders.py --quick --sampling-backends sweep --suite circuit --output-dir artifacts/benchmarks
 ```
 

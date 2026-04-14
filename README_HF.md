@@ -13,7 +13,7 @@ short_description: Interactive Quantum Error Correction + RL visualizer
 
 # ⚛️ Syndrome-Net QEC Lab
 
-Real-time interactive visualizer for **quantum error correction** circuits
+Interactive visualizer for **quantum error correction** circuits
 and **reinforcement learning** decoders, powered by
 [Stim](https://github.com/quantumlib/Stim) and
 [Syndrome-Net](https://github.com/Ryukijano/syndrome-net).
@@ -92,8 +92,7 @@ If you keep `quantumforge` in a separate canonical repository, treat this repo a
 Suggested verification before pushing to HF:
 
 ```bash
-python3 -m pytest tests/test_sampling_backend_contracts.py tests/test_benchmark_decoder_contracts.py tests/test_runtime_contracts.py
-python3 scripts/benchmark_decoders.py --quick --sampling-backends stim --suite circuit --output-dir /tmp/hf-bench
+python3 scripts/ci_contract_verification.sh
 ```
 
 For deployment documentation including command-level repo merge options, see

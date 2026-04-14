@@ -31,11 +31,11 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from surface_code_in_stem.decoders import MWPMDecoder, SparseBlossomDecoder, UnionFindDecoder
+from surface_code_in_stem.decoders import IsingDecoder
 from surface_code_in_stem.decoders.base import DecoderMetadata, DecoderProtocol
 from surface_code_in_stem.decoders.gnn_decoder import NeuralBPDecoder, qLDPCGNNDecoder
 from surface_code_in_stem.dynamic import hexagonal_surface_code, iswap_surface_code, walking_surface_code, xyz2_hexagonal_code
 from surface_code_in_stem.accelerators.sampling_backends import probe_sampling_backends
-from surface_code_in_stem.rl_nested_learning import _logical_error_rate
 from surface_code_in_stem.surface_code import surface_code_circuit_string
 
 try:
@@ -109,6 +109,7 @@ class BenchmarkRow:
     backend_chain_tokens: list[str] | None = None
     contract_flags: str | None = None
     profiler_flags: str | None = None
+    decoder_diagnostics: str | None = None
 
 
 def _ensure_style() -> None:
@@ -146,6 +147,7 @@ def _circuit_decoders() -> dict[str, DecoderProtocol]:
         "mwpm": MWPMDecoder(),
         "union_find": UnionFindDecoder(),
         "sparse_blossom": SparseBlossomDecoder(),
+        "ising": IsingDecoder(),
     }
 
 
@@ -249,9 +251,67 @@ def _synthetic_qldpc_task(name: str, size: int) -> tuple[np.ndarray, np.ndarray]
 
 
 def _evaluate_circuit_logical_error(builder: BuilderFn, decoder: DecoderProtocol, *, distance: int, rounds: int, p: float, shots: int, seed: int) -> float:
+    _, metric = _evaluate_circuit_logical_error_with_diagnostics(
+        builder=builder,
+        decoder=decoder,
+        distance=distance,
+        rounds=rounds,
+        p=p,
+        shots=shots,
+        seed=seed,
+    )
+    return metric
+
+
+def _evaluate_circuit_logical_error_with_diagnostics(
+    builder: BuilderFn,
+    decoder: DecoderProtocol,
+    *,
+    distance: int,
+    rounds: int,
+    p: float,
+    shots: int,
+    seed: int,
+) -> tuple[dict[str, object], float]:
+    try:
+        import stim
+    except ModuleNotFoundError as exc:
+        raise ImportError("Stim is required to sample circuit-level decoders.") from exc
+
     circuit_artifact = builder(distance, rounds, p)
-    circuit_string = circuit_artifact if isinstance(circuit_artifact, str) else str(circuit_artifact)
-    return _logical_error_rate(circuit_string, shots=shots, seed=seed, decoder=decoder)
+    circuit = stim.Circuit(circuit_artifact if isinstance(circuit_artifact, str) else str(circuit_artifact))
+
+    if circuit.num_observables == 0:
+        raise ValueError("Circuit must define observable 0 to estimate logical error rate.")
+
+    dem = None
+    if isinstance(decoder, (MWPMDecoder, IsingDecoder)) and find_spec("pymatching") is not None:
+        dem = circuit.detector_error_model(decompose_errors=True)
+
+    sampler = circuit.compile_detector_sampler(seed=seed)
+    detector_samples, observable_samples = sampler.sample(shots, separate_observables=True)
+
+    metadata = DecoderMetadata(
+        num_observables=circuit.num_observables,
+        detector_error_model=dem,
+        circuit=circuit,
+        seed=seed,
+        extra={"distance": distance, "rounds": rounds},
+    )
+    decoded = decoder.decode(detector_samples, metadata=metadata)
+    logical_predictions = np.asarray(decoded.logical_predictions)
+    if logical_predictions.shape != observable_samples.shape:
+        raise ValueError(
+            f"Decoder returned logical_predictions with shape {logical_predictions.shape}, "
+            f"but expected {observable_samples.shape} to match observable_samples."
+        )
+    if logical_predictions.dtype != observable_samples.dtype:
+        logical_predictions = logical_predictions.astype(observable_samples.dtype, copy=False)
+
+    logical_mismatch = np.logical_xor(logical_predictions, observable_samples)
+    metric = float(np.mean(logical_mismatch[:, 0]))
+    diagnostics = dict(decoded.diagnostics)
+    return diagnostics, metric
 
 
 def _evaluate_parity_decoder(
@@ -379,9 +439,9 @@ def _build_circuit_rows(
         for decoder_name, decoder in decoders.items():
             for distance in distances:
                 for p_idx, p in enumerate(p_values):
-                    metric = _evaluate_circuit_logical_error(
-                        builder,
-                        decoder,
+                    diagnostics, metric = _evaluate_circuit_logical_error_with_diagnostics(
+                        builder=builder,
+                        decoder=decoder,
                         distance=distance,
                         rounds=max(2, distance),
                         p=p,
@@ -411,6 +471,7 @@ def _build_circuit_rows(
                                 shots=shots,
                                 metric_name="logical_error_rate",
                                 metric_value=metric,
+                                decoder_diagnostics=json.dumps(diagnostics, default=str),
                                 **metadata,
                             )
                         )

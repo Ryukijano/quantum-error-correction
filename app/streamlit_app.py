@@ -298,9 +298,9 @@ with st.sidebar:
             index=0,
             help="Choose explicit sampling backend (auto enables dynamic fallback by capability).",
         )
-        available_rl_decoders = get_decoder_names()
-        if not available_rl_decoders:
-            available_rl_decoders = ["mwpm", "union_find"]
+        available_rl_decoders, available_rl_decoders_fallback = _get_decoder_options()
+        if available_rl_decoders_fallback:
+            st.caption("Using fallback decoder list (registry not ready).")
         default_decoder = "mwpm" if "mwpm" in available_rl_decoders else available_rl_decoders[0]
         rl_decoder = st.selectbox(
             "Decoder backend (for diagnostics)",
@@ -308,6 +308,27 @@ with st.sidebar:
             index=available_rl_decoders.index(default_decoder),
             help="Propagates through training metadata for backend experiments.",
         )
+        predecoder_backend = st.selectbox(
+            "Ising pre-decoder backend",
+            ["identity", "disabled", "torch", "safetensors", "numpy"],
+            index=0,
+            help="Choose how the pre-decoder should be instantiated.",
+        )
+        predecoder_artifact = st.text_input(
+            "Ising pre-decoder artifact path",
+            value="",
+            help="Optional path to a torch/safetensor/numpy artifact. Empty means identity path.",
+        )
+        if predecoder_artifact.strip() == "":
+            predecoder_artifact = None
+        predecoder_seed = st.number_input(
+            "Ising pre-decoder seed",
+            min_value=0,
+            max_value=1_000_000,
+            value=0,
+            step=1,
+        )
+        predecoder_seed = int(predecoder_seed) if rl_decoder == "ising" else None
         enable_profile_traces = st.checkbox("Enable backend trace payload", value=False)
         benchmark_probe_token = st.text_input("Trace token (optional)", value="", help="Optional identifier for trace grouping.")
         if benchmark_probe_token == "":
@@ -556,6 +577,13 @@ def _coerce_str_list(value: Any) -> list[str]:
     if value is None:
         return []
     return [str(value).strip()]
+
+
+def _get_decoder_options() -> tuple[list[str], bool]:
+    decoder_names = get_decoder_names()
+    if decoder_names:
+        return decoder_names, False
+    return ["mwpm", "union_find"], True
 
 
 def _coerce_flag_list(value: Any) -> list[str]:
@@ -1005,7 +1033,116 @@ def _reset_rl_runtime_state() -> None:
     st.session_state.backend_profiler_signature = None
 
 
-def _render_circuit_panel(circuit, visualizer: str, diagram_style: str, *, height: int = 540):
+def _build_rl_training_config(
+    *,
+    sampling_backend: str,
+    benchmark_probe_token: str | None,
+    rl_mode: str,
+    distance: int,
+    rounds: int,
+    p_phys: float,
+    episodes: int,
+    batch_size: int,
+    use_diff: bool,
+    rl_decoder: str | None,
+    enable_profile_traces: bool,
+    protocol_name: str,
+    predecoder_backend: str,
+    predecoder_artifact: str | None,
+    predecoder_seed: int | None,
+    seed: int,
+    curriculum_enabled: bool,
+    curriculum_distance_start: int,
+    curriculum_distance_end: int,
+    curriculum_p_start: float,
+    curriculum_p_end: float,
+    curriculum_ramp_episodes: int,
+    early_stopping_patience: int,
+    early_stopping_min_delta: float,
+    max_gradient_norm: float,
+    pepg_population_size: int,
+    pepg_learning_rate: float,
+    pepg_sigma_learning_rate: float,
+) -> RLTrainingConfig:
+    from surface_code_in_stem.accelerators import qhybrid_backend
+
+    capability = qhybrid_backend.probe_capability()
+    auto_use_accelerated = bool(capability.get("enabled", False))
+    resolved_sampling_backend = None if sampling_backend == "auto" else sampling_backend
+    resolved_use_accelerated = auto_use_accelerated if sampling_backend == "auto" else sampling_backend != "stim"
+    token = benchmark_probe_token.strip() if isinstance(benchmark_probe_token, str) else None
+    trace_token = token if token else None
+
+    return RLTrainingConfig(
+        mode=rl_mode,
+        distance=distance,
+        rounds=rounds,
+        physical_error_rate=p_phys,
+        episodes=episodes,
+        batch_size=batch_size,
+        use_diffusion=use_diff,
+        use_accelerated=resolved_use_accelerated,
+        sampling_backend=resolved_sampling_backend,
+        decoder_name=rl_decoder,
+        enable_profile_traces=enable_profile_traces,
+        benchmark_probe_token=trace_token,
+        protocol=protocol_name,
+        syndrome_emit_every=max(1, episodes // 40),
+        seed=seed,
+        predecoder_backend=predecoder_backend,
+        predecoder_artifact=predecoder_artifact,
+        predecoder_seed=predecoder_seed,
+        curriculum_enabled=curriculum_enabled,
+        curriculum_distance_start=curriculum_distance_start,
+        curriculum_distance_end=curriculum_distance_end,
+        curriculum_p_start=curriculum_p_start,
+        curriculum_p_end=curriculum_p_end,
+        curriculum_ramp_episodes=curriculum_ramp_episodes,
+        early_stopping_patience=early_stopping_patience,
+        early_stopping_min_delta=early_stopping_min_delta,
+        max_gradient_norm=max_gradient_norm,
+        pepg_population_size=int(pepg_population_size),
+        pepg_learning_rate=float(pepg_learning_rate),
+        pepg_sigma_learning_rate=float(pepg_sigma_learning_rate),
+    )
+
+
+def _drain_rl_events(runner: RLTrainingService) -> bool:
+    events = runner.drain_events(max_events=80, coalesce=True)
+    dropped_events = runner.dropped_events()
+    if dropped_events != st.session_state.queue_drop_count:
+        st.session_state.queue_drop_count = dropped_events
+
+    metrics_updated = False
+    for ev in events:
+        if ev.kind == "metric":
+            data = metric_payload_for_history(ev.payload)
+            _append_history(data, st.session_state.history)
+            st.session_state.history_version += 1
+            st.session_state.history_dirty = True
+            metrics_updated = True
+            st.session_state.training_episode = int(data.get("episode", 0))
+        elif ev.kind == "syndrome":
+            st.session_state.latest_syndrome = np.asarray(ev.payload.get("syndrome", []), dtype=np.int8)
+            st.session_state.latest_action = np.asarray(ev.payload.get("action", []), dtype=np.int8)
+            st.session_state.latest_correct = bool(ev.payload.get("correct", False))
+            st.session_state.history_dirty = st.session_state.history_dirty or metrics_updated
+        elif ev.kind == "done":
+            st.session_state.training_done = True
+        elif ev.kind == "error":
+            st.session_state.training_error = ev.payload.get("message", "")
+
+    return metrics_updated
+
+
+def _render_circuit_panel(
+    circuit,
+    visualizer: str,
+    diagram_style: str,
+    *,
+    height: int = 540,
+    chart_key: str | None = None,
+):
     if visualizer == "matchgraph":
         html_str = circuit_matchgraph_html(circuit)
         st.components.v1.html(html_str, height=height, scrolling=True)
@@ -1013,7 +1150,11 @@ def _render_circuit_panel(circuit, visualizer: str, diagram_style: str, *, heigh
 
     if visualizer == "plotly":
         fig = get_visualizer("plotly").render_circuit(circuit)
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(
+            fig,
+            width="stretch",
+            key=chart_key or f"circuit_plotly_{visualizer}_{height}",
+        )
         return
 
     if visualizer == "crumble":
@@ -1061,7 +1202,13 @@ with tab_circuit:
 
         with col_svg:
             st.markdown("#### Circuit diagram")
-            _render_circuit_panel(circuit, visualizer_name, diagram_type, height=540)
+            _render_circuit_panel(
+                circuit,
+                visualizer_name,
+                diagram_type,
+                height=540,
+                chart_key=f"circuit_plotly_main_{distance}_{rounds}_{p_phys}_{code_family}_{visualizer_name}_{diagram_type}",
+            )
 
         with col_graph:
             st.markdown("#### Detector error graph")
@@ -1071,13 +1218,21 @@ with tab_circuit:
             syn = _sample_detector_syndrome(distance=distance, rounds=rounds, p=p_phys, builder=code_family)
 
             dem_fig = detector_graph(circuit, syndrome=syn, title="DEM — sample syndrome")
-            st.plotly_chart(dem_fig, width="stretch")
+            st.plotly_chart(
+                dem_fig,
+                width="stretch",
+                key=f"dem_graph_main_{distance}_{rounds}_{p_phys}_{code_family}",
+            )
 
         st.divider()
         st.markdown("#### Syndrome heatmap (single shot)")
         if syn is not None:
             hm_fig = syndrome_heatmap(syn, distance=distance)
-            st.plotly_chart(hm_fig, width="stretch")
+            st.plotly_chart(
+                hm_fig,
+                width="stretch",
+                key=f"syndrome_heatmap_main_{distance}_{rounds}_{p_phys}_{code_family}",
+            )
             fired = int(np.sum(syn))
             st.caption(f"🔴 {fired} / {len(syn)} detectors fired in this shot.")
 
@@ -1114,35 +1269,29 @@ with tab_rl:
     with status_col:
         status_box = st.empty()
 
-    # Handle start
     if start_btn:
         if runner and runner.is_running():
             st.warning("Training is already running.")
+        elif rl_decoder not in available_rl_decoders:
+            st.error(f"Selected decoder '{rl_decoder}' is not available.")
         else:
             _reset_rl_runtime_state()
-            from surface_code_in_stem.accelerators import qhybrid_backend
-            capability = qhybrid_backend.probe_capability()
-            auto_use_accelerated = bool(capability.get("enabled", False))
-            resolved_sampling_backend = None if sampling_backend == "auto" else sampling_backend
-            resolved_use_accelerated = auto_use_accelerated if sampling_backend == "auto" else sampling_backend != "stim"
-            trace_token = (
-                benchmark_probe_token.strip() if isinstance(benchmark_probe_token, str) else ""
-            )
-            service_config = RLTrainingConfig(
-                mode=rl_mode,
+            service_config = _build_rl_training_config(
+                sampling_backend=sampling_backend,
+                benchmark_probe_token=benchmark_probe_token,
+                rl_mode=rl_mode,
                 distance=distance,
                 rounds=rounds,
-                physical_error_rate=p_phys,
+                p_phys=p_phys,
                 episodes=episodes,
                 batch_size=batch_size,
-                use_diffusion=use_diff,
-                use_accelerated=resolved_use_accelerated,
-                sampling_backend=resolved_sampling_backend,
-                decoder_name=rl_decoder,
+                use_diff=use_diff,
+                rl_decoder=rl_decoder,
                 enable_profile_traces=enable_profile_traces,
-                benchmark_probe_token=trace_token or None,
-                protocol=protocol_name,
-                syndrome_emit_every=max(1, episodes // 40),
+                protocol_name=protocol_name,
+                predecoder_backend=predecoder_backend,
+                predecoder_artifact=predecoder_artifact,
+                predecoder_seed=predecoder_seed,
                 seed=seed,
                 curriculum_enabled=curriculum_enabled,
                 curriculum_distance_start=curriculum_distance_start,
@@ -1153,13 +1302,12 @@ with tab_rl:
                 early_stopping_patience=early_stopping_patience,
                 early_stopping_min_delta=early_stopping_min_delta,
                 max_gradient_norm=max_gradient_norm,
-                pepg_population_size=int(pepg_population_size),
-                pepg_learning_rate=float(pepg_learning_rate),
-                pepg_sigma_learning_rate=float(pepg_sigma_learning_rate),
+                pepg_population_size=pepg_population_size,
+                pepg_learning_rate=pepg_learning_rate,
+                pepg_sigma_learning_rate=pepg_sigma_learning_rate,
             )
-            new_runner = RLTrainingService(service_config)
-            new_runner.start()
-            st.session_state.runner = new_runner
+            st.session_state.runner = RLTrainingService(service_config)
+            st.session_state.runner.start()
 
     if stop_btn and runner:
         runner.stop()
@@ -1235,16 +1383,30 @@ with tab_rl:
         if circuit is None:
             st.error("Could not build circuit")
         else:
-            _render_circuit_panel(circuit, visualizer_name, diagram_type, height=480)
+            _render_circuit_panel(
+                circuit,
+                visualizer_name,
+                diagram_type,
+                height=480,
+                chart_key=f"circuit_plotly_rl_{distance}_{rounds}_{p_phys}_{code_family}_{visualizer_name}_{diagram_type}",
+            )
             
             st.caption("Detector graph and heatmap below")
             syn = _sample_detector_syndrome(distance=distance, rounds=rounds, p=p_phys, builder=code_family)
             if syn is not None:
                 try:
                     dem_fig = detector_graph(circuit, syndrome=syn, title="DEM — sample")
-                    st.plotly_chart(dem_fig, use_container_width=True)
+                    st.plotly_chart(
+                        dem_fig,
+                        use_container_width=True,
+                        key=f"dem_graph_rl_{distance}_{rounds}_{p_phys}_{code_family}",
+                    )
                     hm_fig = syndrome_heatmap(syn, distance=distance, title="Syndrome Heatmap")
-                    st.plotly_chart(hm_fig, use_container_width=True)
+                    st.plotly_chart(
+                        hm_fig,
+                        use_container_width=True,
+                        key=f"syndrome_heatmap_rl_{distance}_{rounds}_{p_phys}_{code_family}",
+                    )
                 except Exception as e:
                     st.warning(f"Circuit viz error: {e}")
         
@@ -1288,30 +1450,7 @@ with tab_rl:
             '<span class="live-indicator"></span> <span class="badge-running">TRAINING LIVE</span>',
             unsafe_allow_html=True,
         )
-
-        # Drain all queued events this cycle
-        events = runner.drain_events(max_events=80, coalesce=True)
-        if runner.dropped_events() != st.session_state.queue_drop_count:
-            st.session_state.queue_drop_count = runner.dropped_events()
-
-        metrics_updated = False
-        for ev in events:
-            if ev.kind == "metric":
-                data = metric_payload_for_history(ev.payload)
-                _append_history(data, st.session_state.history)
-                st.session_state.history_version += 1
-                st.session_state.history_dirty = True
-                metrics_updated = True
-                st.session_state.training_episode = int(data.get("episode", 0))
-            elif ev.kind == "syndrome":
-                st.session_state.latest_syndrome = np.asarray(ev.payload.get("syndrome", []), dtype=np.int8)
-                st.session_state.latest_action = np.asarray(ev.payload.get("action", []), dtype=np.int8)
-                st.session_state.latest_correct = bool(ev.payload.get("correct", False))
-                st.session_state.history_dirty = st.session_state.history_dirty or metrics_updated
-            elif ev.kind == "done":
-                st.session_state.training_done = True
-            elif ev.kind == "error":
-                st.session_state.training_error = ev.payload.get("message", "")
+        _drain_rl_events(runner)
 
         # Schedule rerun to keep polling
         time.sleep(0.05)
@@ -1538,7 +1677,10 @@ with tab_threshold:
 
     th_col1, th_col2 = st.columns([1, 2])
     with th_col1:
-        th_decoder = st.selectbox("Decoder", get_decoder_names())
+        available_threshold_decoders, available_threshold_decoders_fallback = _get_decoder_options()
+        if available_threshold_decoders_fallback:
+            st.caption("Using fallback decoder list (registry not ready).")
+        th_decoder = st.selectbox("Decoder", available_threshold_decoders)
         th_builder = st.selectbox("Code family", get_builder_names())
         th_quick    = st.checkbox("Quick sweep (fast, fewer shots)", value=True)
         th_distances = st.multiselect("Distances", [3, 5, 7, 9], default=[3, 5])
@@ -1555,6 +1697,8 @@ with tab_threshold:
     if th_run_btn:
         if st.session_state.threshold_sweep_job is not None:
             th_info.warning("A threshold sweep is already running.")
+        elif th_decoder not in available_threshold_decoders:
+            th_info.error(f"Selected decoder '{th_decoder}' is not available.")
         else:
             p_values = np.linspace(0.003, 0.018, 7) if th_quick else np.linspace(0.001, 0.020, 13)
             shots = 256 if th_quick else 2048
